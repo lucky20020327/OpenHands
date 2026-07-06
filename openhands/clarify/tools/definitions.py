@@ -41,25 +41,26 @@ CORE_ABI_PLACEHOLDER = """#pragma once
 // CoreInput/CoreOutput definitions and the core function declaration.
 """
 
-KLEE_HELPERS_HPP = """#pragma once
-#include <klee/klee.h>
+_RESOURCES_DIR = Path(__file__).resolve().parent.parent / "klee" / "resources"
 
-template <typename T>
-inline T clarify_symbolic(const char* name) {
-  T value{};
-  klee_make_symbolic(&value, sizeof(value), name);
-  return value;
-}
-"""
 
-KLEE_RULES = """# KLEE Implementation Rules
+def _load_klee_resource(name: str, fallback: str) -> str:
+    """Load a KLEE static resource file, falling back to a minimal stub."""
+    try:
+        return (_RESOURCES_DIR / name).read_text(encoding="utf-8")
+    except OSError:
+        return fallback
 
-- Keep harness and mock code deterministic.
-- Do not read hidden tests, reference patches, or oracle artifacts.
-- Put shared ABI declarations in `core_abi.hpp`.
-- Use paired `harness_<i>.cpp` and `mock_<i>.cpp` files for each entry point.
-- Run `clarify_klee_solve` after writing or editing a variant.
-"""
+
+KLEE_HELPERS_HPP: str = _load_klee_resource(
+    "klee_helpers.hpp",
+    "#pragma once\n#include <klee/klee.h>\n",
+)
+
+KLEE_RULES: str = _load_klee_resource(
+    "KLEE_IMPLEMENTATION_RULES.md",
+    "# KLEE Implementation Rules\n\n- Use paired harness/mock files per entry point.\n",
+)
 
 
 def _text_observation(
