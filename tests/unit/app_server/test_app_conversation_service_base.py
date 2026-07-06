@@ -26,10 +26,14 @@ class MockUserInfo:
     """Mock class for UserInfo to simulate user settings."""
 
     def __init__(
-        self, git_user_name: str | None = None, git_user_email: str | None = None
+        self,
+        git_user_name: str | None = None,
+        git_user_email: str | None = None,
+        git_full_clone: bool = False,
     ):
         self.git_user_name = git_user_name
         self.git_user_email = git_user_email
+        self.git_full_clone = git_full_clone
 
 
 class MockCommandResult:
@@ -764,6 +768,103 @@ def mock_workspace():
 
 
 @pytest.mark.asyncio
+async def test_clone_or_init_git_repo_uses_shallow_clone_by_default(mock_workspace):
+    user_info = MockUserInfo()
+    service, mock_user_context = _create_service_with_mock_user_context(
+        user_info,
+        bind_methods=(
+            'clone_or_init_git_repo',
+            '_get_azure_devops_bearer_token_for_git',
+        ),
+    )
+    service.init_git_in_empty_workspace = True
+    mock_user_context.get_authenticated_git_url = AsyncMock(
+        return_value='https://github.com/owner/repo.git'
+    )
+
+    task = Mock()
+    task.request = Mock(
+        selected_repository='owner/repo',
+        selected_branch=None,
+        git_provider=ProviderType.GITHUB,
+    )
+
+    await service.clone_or_init_git_repo(task, mock_workspace)
+
+    mock_workspace.execute_command.assert_any_call(
+        'git clone --depth 1 https://github.com/owner/repo.git repo',
+        mock_workspace.working_dir,
+        120,
+    )
+
+
+@pytest.mark.asyncio
+async def test_clone_or_init_git_repo_shallow_clones_selected_branch(mock_workspace):
+    user_info = MockUserInfo()
+    service, mock_user_context = _create_service_with_mock_user_context(
+        user_info,
+        bind_methods=(
+            'clone_or_init_git_repo',
+            '_get_azure_devops_bearer_token_for_git',
+        ),
+    )
+    service.init_git_in_empty_workspace = True
+    mock_user_context.get_authenticated_git_url = AsyncMock(
+        return_value='https://github.com/owner/repo.git'
+    )
+
+    task = Mock()
+    task.request = Mock(
+        selected_repository='owner/repo',
+        selected_branch='feature-branch',
+        git_provider=ProviderType.GITHUB,
+    )
+
+    await service.clone_or_init_git_repo(task, mock_workspace)
+
+    mock_workspace.execute_command.assert_any_call(
+        'git clone --depth 1 --branch feature-branch https://github.com/owner/repo.git repo',
+        mock_workspace.working_dir,
+        120,
+    )
+
+
+@pytest.mark.asyncio
+async def test_clone_or_init_git_repo_preserves_full_clone_when_enabled(
+    mock_workspace,
+):
+    user_info = MockUserInfo(git_full_clone=True)
+    service, mock_user_context = _create_service_with_mock_user_context(
+        user_info,
+        bind_methods=(
+            'clone_or_init_git_repo',
+            '_get_azure_devops_bearer_token_for_git',
+        ),
+    )
+    service.init_git_in_empty_workspace = True
+    mock_user_context.get_authenticated_git_url = AsyncMock(
+        return_value='https://github.com/owner/repo.git'
+    )
+
+    task = Mock()
+    task.request = Mock(
+        selected_repository='owner/repo',
+        selected_branch='feature-branch',
+        git_provider=ProviderType.GITHUB,
+    )
+
+    await service.clone_or_init_git_repo(task, mock_workspace)
+
+    mock_workspace.execute_command.assert_any_call(
+        'git clone https://github.com/owner/repo.git repo',
+        mock_workspace.working_dir,
+        120,
+    )
+    commands = [call.args[0] for call in mock_workspace.execute_command.call_args_list]
+    assert not any('git clone --depth 1' in command for command in commands)
+
+
+@pytest.mark.asyncio
 async def test_clone_or_init_git_repo_quotes_selected_branch_before_checkout(
     mock_workspace,
 ):
@@ -832,7 +933,7 @@ async def test_clone_or_init_git_repo_configures_dynamic_azure_devops_helper(
 
     commands = [call.args[0] for call in mock_workspace.execute_command.call_args_list]
     assert any(
-        "git -c http.extraheader='Authorization: Bearer header.payload.signature' clone"
+        "git -c http.extraheader='Authorization: Bearer header.payload.signature' clone --depth 1 --branch main"
         in command
         for command in commands
     )
@@ -1178,6 +1279,8 @@ class TestLoadAndMergeAllSkills:
             assert call_kwargs['agent_server_url'] == 'http://localhost:8000'
             assert call_kwargs['session_api_key'] == 'test-api-key'
             assert call_kwargs['project_dir'] == '/workspace/repo'
+            # Verify registered_marketplaces is passed (can be None or a list)
+            assert 'registered_marketplaces' in call_kwargs
 
     @pytest.mark.asyncio
     @patch(
@@ -1300,3 +1403,46 @@ class TestLoadAndMergeAllSkills:
 
             # Assert
             assert result == []
+
+
+class TestLoadSkillsAndUpdateAgent:
+    """_load_skills_and_update_agent threads marketplaces into skill loading."""
+
+    @pytest.mark.asyncio
+    async def test_forwards_registered_marketplaces(self):
+        """Registered marketplaces reach load_and_merge_all_skills at startup."""
+        # Arrange
+        from openhands.app_server.settings.settings_models import (
+            MarketplaceRegistration,
+        )
+
+        mock_user_context = Mock(spec=UserContext)
+        with patch.object(AppConversationServiceBase, '__abstractmethods__', set()):
+            service = AppConversationServiceBase(
+                init_git_in_empty_workspace=True, user_context=mock_user_context
+            )
+            service.load_and_merge_all_skills = AsyncMock(return_value=[])
+            service._create_agent_with_skills = Mock(return_value='updated-agent')
+
+            remote_workspace = AsyncMock()
+            remote_workspace.host = 'http://agent:8000'
+            marketplaces = [
+                MarketplaceRegistration(name='team', source='github:o/team')
+            ]
+
+            # Act
+            result = await service._load_skills_and_update_agent(
+                Mock(spec=SandboxInfo),
+                Mock(),
+                remote_workspace,
+                'owner/repo',
+                '/workspace/repo',
+                registered_marketplaces=marketplaces,
+            )
+
+            # Assert
+            assert result == 'updated-agent'
+            forwarded = service.load_and_merge_all_skills.call_args.kwargs[
+                'registered_marketplaces'
+            ]
+            assert forwarded == marketplaces
