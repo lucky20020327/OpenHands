@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -379,6 +380,23 @@ def _write_replay_failure_diagnostics(
     return [str(json_path), str(log_path)]
 
 
+_TRACE_LOCK = __import__("threading").Lock()
+
+
+def _append_trace_event(workspace: Path | None, event: dict[str, Any]) -> None:
+    """Append one JSON line to ``{workspace}/trace.jsonl`` (best-effort)."""
+    if workspace is None:
+        return
+    try:
+        trace_path = workspace / "trace.jsonl"
+        workspace.mkdir(parents=True, exist_ok=True)
+        with _TRACE_LOCK:
+            with trace_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ClarifyObservation(Observation):
     command: str = Field(description="Clarify command that was executed.")
     data: dict[str, Any] = Field(default_factory=dict)
@@ -441,21 +459,50 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         action: Action,
         conversation: "LocalConversation | None" = None,  # noqa: ARG002
     ) -> ClarifyObservation:
+        t0 = time.monotonic()
         if isinstance(action, ClarifyWorkspaceGenerateAction):
-            return self.workspace_generate(action)
-        if isinstance(action, ClarifyClaimVariantAction):
-            return self.claim_variant(action)
-        if isinstance(action, ClarifyKleeSolveAction):
-            return self.klee_solve(action)
-        if isinstance(action, ClarifyCrossValidationAction):
-            return self.cross_validation(action)
-        if isinstance(action, ClarifyTaskDoneAction):
-            return self.task_done(action)
-        return _text_observation(
-            f"Unsupported Clarify action: {action.__class__.__name__}",
-            is_error=True,
-            command="unknown",
-        )
+            obs = self.workspace_generate(action)
+        elif isinstance(action, ClarifyClaimVariantAction):
+            obs = self.claim_variant(action)
+        elif isinstance(action, ClarifyKleeSolveAction):
+            obs = self.klee_solve(action)
+        elif isinstance(action, ClarifyCrossValidationAction):
+            obs = self.cross_validation(action)
+        elif isinstance(action, ClarifyTaskDoneAction):
+            obs = self.task_done(action)
+        else:
+            obs = _text_observation(
+                f"Unsupported Clarify action: {action.__class__.__name__}",
+                is_error=True,
+                command="unknown",
+            )
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        workspace = self._workspace_path()
+        trace_event: dict[str, Any] = {
+            "tool": obs.command,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "elapsed_ms": round(elapsed_ms, 1),
+            "is_error": obs.is_error,
+            "data": {
+                k: v
+                for k, v in obs.data.items()
+                if k not in ("stdout_tail", "stderr_tail")
+            },
+        }
+        if "returncode" in obs.data:
+            trace_event["returncode"] = obs.data["returncode"]
+        _append_trace_event(workspace, trace_event)
+        return obs
+
+    def _workspace_path(self) -> Path | None:
+        """Return the current clarify workspace path, or None if not yet set."""
+        try:
+            state = self._load()
+            if state.workspace:
+                return Path(state.workspace)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def workspace_generate(
         self, action: ClarifyWorkspaceGenerateAction
@@ -854,28 +901,108 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         )
 
     def task_done(self, action: ClarifyTaskDoneAction) -> ClarifyObservation:
+        from openhands.clarify.artifact_schema import (
+            ClusterEntry,
+            ClarifyReportPayload,
+            ToolRunEvent,
+            write_report_html,
+            write_report_json,
+            write_disambiguated_request,
+        )
+
         state = self._load()
         state.task_done_status = action.status
         state.task_done_summary = action.summary
         state.task_done_report = action.report
         self._save(state)
+
         report_path = None
+        html_path = None
+        disambig_path = None
+        now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
         if state.workspace:
-            report_path = Path(state.workspace) / "clarify_report.json"
-            report_path.write_text(
-                json.dumps(
-                    {
-                        "status": action.status,
-                        "summary": action.summary,
-                        "report": action.report,
-                        "state": state_as_public_dict(state),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
+            workspace = Path(state.workspace)
+
+            # Build cluster list from cross-validation output if available.
+            clusters: list[ClusterEntry] = []
+            cluster_summary_path = workspace / "cross_val" / "cluster_summary.json"
+            if cluster_summary_path.is_file():
+                try:
+                    cs = json.loads(cluster_summary_path.read_text(encoding="utf-8"))
+                    for c in cs.get("clusters", []):
+                        clusters.append(
+                            ClusterEntry(
+                                cluster_id=c.get("cluster_id", 0),
+                                size=c.get("size", 0),
+                                ktests=c.get("ktests", [])[:50],
+                                path=str(c.get("path", "")),
+                                signatures_by_variant=c.get("signatures_by_variant", {}),
+                            )
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
+            # Read trace events already written by prior tool calls.
+            tool_runs: list[ToolRunEvent] = []
+            trace_path = workspace / "trace.jsonl"
+            if trace_path.is_file():
+                for line in trace_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        tool_runs.append(
+                            ToolRunEvent(
+                                tool=ev.get("tool", ""),
+                                timestamp=ev.get("timestamp", ""),
+                                elapsed_ms=float(ev.get("elapsed_ms", 0)),
+                                is_error=bool(ev.get("is_error", False)),
+                                returncode=ev.get("returncode"),
+                                data={
+                                    k: v
+                                    for k, v in ev.get("data", {}).items()
+                                    if k in ("variant_id", "variant_dir", "ktest_count", "workspace")
+                                },
+                            )
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            # Collect metadata.
+            metadata: dict[str, Any] = {}
+            metadata_path = workspace / "metadata.json"
+            if metadata_path.is_file():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    pass
+
+            payload = ClarifyReportPayload(
+                instance_id=state.instance_id or metadata.get("instance_id", ""),
+                dataset=state.dataset or metadata.get("dataset", "featurebench"),
+                mode="hybrid",
+                status=action.status,
+                summary=action.summary,
+                report=action.report,
+                clusters=clusters,
+                tool_runs=tool_runs,
+                workspace=str(workspace),
+                finished_at=now_iso,
+                state={
+                    k: v
+                    for k, v in (state.__dict__ if hasattr(state, "__dict__") else {}).items()
+                    if not k.startswith("_") and k != "state_path"
+                },
             )
+
+            report_path = write_report_json(payload, workspace / "clarify_report.json")
+            html_path = write_report_html(payload, workspace / "clarify_report.html")
+            disambig_path = write_disambiguated_request(
+                payload, workspace / "disambiguated_request.md"
+            )
+
         return _text_observation(
             f"Clarify task marked {action.status}: {action.summary}",
             is_error=action.status != "complete",
@@ -884,6 +1011,8 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
                 "status": action.status,
                 "summary": action.summary,
                 "report_path": str(report_path) if report_path else None,
+                "html_path": str(html_path) if html_path else None,
+                "disambiguated_request_path": str(disambig_path) if disambig_path else None,
             },
         )
 
