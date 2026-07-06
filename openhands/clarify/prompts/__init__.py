@@ -4,7 +4,6 @@ Converts the ADK ``user_query.j2`` template to a Python function that builds
 the full clarify orchestrator prompt for the OpenHands runtime.
 
 Tool-name mapping vs. the ADK version:
-  workspace_generate          → clarify_workspace_generate
   cross_validation            → clarify_cross_validation
   user_request_completed      → clarify_task_done
   klee_solve                  → clarify_klee_solve
@@ -14,6 +13,8 @@ Tool-name mapping vs. the ADK version:
 """
 
 from __future__ import annotations
+
+import json
 
 __all__ = ["build_orchestrator_prompt"]
 
@@ -28,8 +29,8 @@ patches, gold patches, or f2p lists.
 The feature request leaves the behavior undefined. Multiple valid interpretations
 exist; the request text does NOT uniquely determine the correct behavior.
 
-**Detect**: Locate the divergence point in `feature_request.md`. If the request
-is silent or genuinely ambiguous about that behavior, and multiple
+**Detect**: Locate the divergence point in the user-provided feature request or
+specification material. If the request is silent or genuinely ambiguous about that behavior, and multiple
 implementations could each claim faithfulness → `design_ambiguity`.
 
 **Example**: "return appropriate error on NULL" without specifying which error
@@ -47,7 +48,7 @@ outputs.
 A variant **violates something the request explicitly states**. The request is
 clear; the variant simply did not follow it.
 
-**Detect**: Find the text in `feature_request.md`. If request says X and variant
+**Detect**: Find the relevant request text. If request says X and variant
 B does not-X → `implementation_error` for variant B only.
 
 **Example**: Request says "must not return dstSize_tooSmall when dst is NULL and
@@ -96,7 +97,7 @@ When calling `clarify_task_done`:
 
 ### Feature Request Ambiguity Report
 
-**Feature**: [instance_id + one-line description]
+**Feature**: [task_id + one-line description]
 **Entry point(s)**: [names of the entry points modeled]
 **Analysis scope**: [briefly describe modeled entry points and any important
 uncovered areas]
@@ -114,7 +115,7 @@ For each `design_ambiguity` or `benign_choice` root cause:
 **[A1]** [One-sentence summary]
 - **Class**: design_ambiguity | benign_choice
 - **Confidence**: [1-10]
-- **Request text**: [Quote the relevant feature_request.md sentence/paragraph,
+- **Request text**: [Quote the relevant request sentence/paragraph,
   or "The request is silent about <specific decision>"]
 - **Ambiguity cause**: [Explain the exact missing condition, undefined term,
   vague verb, competing references, unspecified error/output, or unspecified
@@ -194,8 +195,8 @@ def build_orchestrator_prompt(
     Parameters
     ----------
     task:
-        Task dict with at minimum ``instance_id`` and ``problem_statement``.
-        May also contain ``repo``, ``base_commit``, ``language``, ``level``.
+        Task dict with at minimum ``task_id`` and ``feature_request``.
+        May also contain opaque ``metadata`` supplied by the caller.
     mode:
         One of ``"hybrid"`` (default), ``"bold"``, ``"self_check_only"``,
         ``"difference_only"``.
@@ -224,13 +225,33 @@ def build_orchestrator_prompt(
     return _build_hybrid_prompt(task, header, mode, n_variants, half, half_plus_one)
 
 
+def _task_id(task: dict) -> str:
+    return str(task.get("task_id") or "unknown")
+
+
+def _feature_request(task: dict) -> str:
+    return str(task.get("feature_request") or "")
+
+
+def _task_context_lines(task: dict) -> list[str]:
+    lines = [f"Task ID: {_task_id(task)}"]
+    metadata = task.get("metadata")
+    if isinstance(metadata, dict) and metadata:
+        lines.extend([
+            "Metadata:",
+            "```json",
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+            "```",
+        ])
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Mode builders
 # ---------------------------------------------------------------------------
 
 def _build_bold_prompt(task: dict, header: str) -> str:
-    instance_id = task.get("instance_id", "unknown")
-    problem_statement = task.get("problem_statement", "")
+    feature_request = _feature_request(task)
 
     lines = [
         header,
@@ -239,21 +260,22 @@ def _build_bold_prompt(task: dict, header: str) -> str:
         "",
         "Running in **bold mode**. No KLEE variants, no cross-validation, "
         "no sub-agents.",
-        "Read `feature_request.md` directly and perform static analysis to "
-        "identify ambiguity.",
+        "Use the user request and current workspace contents directly to "
+        "perform static ambiguity analysis.",
         "",
         "## Mission",
         "",
         "Produce a \"Feature Request Ambiguity Report\" via static analysis of "
-        "`feature_request.md`.",
+        "the user-provided feature request/specification.",
         "",
         "## Execution Steps",
         "",
-        "### Step 1: Prepare workspace",
+        "### Step 1: Inspect the prepared workspace",
         "",
-        "Call `clarify_workspace_generate`. This populates the workspace with "
-        "the feature request and any reference code. Read `feature_request.md` "
-        "and use the emitted directory tree (or `ls`) to find reference material.",
+        "The business workspace has already been prepared by the caller. Do not "
+        "call a business workspace preparation tool and do not assume fixed "
+        "filenames. Use the user request plus whatever files/paths the user "
+        "provided or that are present in the current workspace.",
         "",
         "### Step 2: Static analysis",
         "",
@@ -269,19 +291,20 @@ def _build_bold_prompt(task: dict, header: str) -> str:
         "",
         "1. **Test-free**: NEVER look at `test_patch`, `gold_patch`, `f2p`, or "
         "test files. These are invisible to the method.",
-        "2. **Actionable ambiguity reporting**: Do not suggest code fixes. Do "
+        "2. **No web tools**: Do not use browser, web search, Tavily, or "
+        "internet-fetch tools. Use only the Clarify workspace and public "
+        "reference files provided there.",
+        "3. **Actionable ambiguity reporting**: Do not suggest code fixes. Do "
         "state the spec clarification question or decision needed to remove "
         "each ambiguity.",
-        "3. **Full report handoff**: The final `clarify_task_done.report` field "
+        "4. **Full report handoff**: The final `clarify_task_done.report` field "
         "must contain the full Feature Request Ambiguity Report, not just the "
         "summary section.",
         "",
-        f"Instance ID: {instance_id}",
-        f"Repository: {task.get('repo', 'unknown')}",
-        f"Base commit: {task.get('base_commit', 'unknown')}",
+        *_task_context_lines(task),
         "",
         "Feature request:",
-        problem_statement,
+        feature_request,
     ]
     return "\n".join(lines)
 
@@ -293,8 +316,7 @@ def _build_self_check_only_prompt(
     half: int,
     half_plus_one: int,
 ) -> str:
-    instance_id = task.get("instance_id", "unknown")
-    problem_statement = task.get("problem_statement", "")
+    feature_request = _feature_request(task)
     persona = _PERSONA_BLOCK.format(
         n_variants=n_variants,
         half_variants=half,
@@ -318,34 +340,35 @@ def _build_self_check_only_prompt(
         "",
         "## Execution Steps (strictly in order)",
         "",
-        "### Step 1: Prepare workspace",
+        "### Step 1: Inspect the prepared workspace",
         "",
-        "Call `clarify_workspace_generate`. This will:",
-        "- Populate the workspace via the configured provider (feature request "
-        "+ any reference code)",
-        "- Create `<workspace>/klee/` directory for harness_writer",
+        "The business workspace has already been prepared by the caller. Do not "
+        "call a business workspace preparation tool and do not assume fixed "
+        "filenames or directories. Use the user request and current workspace "
+        "contents as the source of truth.",
         "",
-        "The emitted directory tree is the source of truth for what the "
-        "workspace contains.",
+        "### Step 2: Prepare KLEE scaffold",
         "",
-        "### Step 2: Serial — harness_writer",
+        "Call `clarify_prepare_klee`. This creates only OpenHands-clarify KLEE "
+        "support files under an internal scaffold directory; it does not create "
+        "or modify business/specification workspace content. Pass the returned "
+        "`scaffold_dir` to harness_writer.",
+        "",
+        "### Step 3: Serial — harness_writer",
         "",
         "Start the `clarify_harness_writer` sub-agent **once**:",
         "- This step is **serial** — wait for it to complete before proceeding",
         "- Give only the high-level goal in the task prompt. Do not restate a "
         "file-by-file workflow; harness_writer's own instruction decides how "
         "to gather evidence from the workspace.",
-        "- harness_writer reads `feature_request.md` + any workspace reference "
-        "code, infers a request-coverage-preserving symbolic input ABI for one "
-        "or more entry points, and writes:",
-        "  - `<workspace>/klee/core_abi.hpp` — shared ABI header, one "
-        "`// entry_point: <name>` tag per entry point",
-        "  - `<workspace>/klee/harness_<i>.cpp` — one shared symbolic driver "
-        "per entry point (fixed `klee_make_symbolic` calls)",
+        "- harness_writer reads the user request plus relevant workspace "
+        "materials, infers a request-coverage-preserving symbolic input ABI "
+        "for one or more entry points, and writes the shared KLEE scaffold at "
+        "the `scaffold_dir` returned by `clarify_prepare_klee`.",
         "- harness_writer returns a `fuzzy_design_report` capturing "
         "interface-level ambiguities",
         "",
-        "### Step 3: Parallel — simulation_writer variants",
+        "### Step 4: Parallel — simulation_writer variants",
         "",
         f"Start **{n_variants} clarify_simulation_writer sub-agents in a "
         "single response** (parallel):",
@@ -355,12 +378,12 @@ def _build_self_check_only_prompt(
         "",
         persona,
         "",
-        "### Step 4 (self_check_only mode): Compile report",
+        "### Step 5 (self_check_only mode): Compile report",
         "",
         "Collect:",
-        "- harness_writer's `fuzzy_design_report` (returned in Step 2)",
+        "- harness_writer's `fuzzy_design_report` (returned in Step 3)",
         "- all simulation_writers' `fuzzy_design_report` fields (returned in "
-        "Step 3)",
+        "Step 4)",
         "",
         "Deduplicate and merge. Submit the final report via `clarify_task_done`, "
         "with the complete report in the `report` field.",
@@ -370,12 +393,10 @@ def _build_self_check_only_prompt(
         _REPORT_FORMAT.format(ambiguity_classes=_AMBIGUITY_CLASSES),
         _IMPORTANT_RULES,
         "",
-        f"Instance ID: {instance_id}",
-        f"Repository: {task.get('repo', 'unknown')}",
-        f"Base commit: {task.get('base_commit', 'unknown')}",
+        *_task_context_lines(task),
         "",
         "Feature request:",
-        problem_statement,
+        feature_request,
     ]
     return "\n".join(lines)
 
@@ -388,8 +409,7 @@ def _build_hybrid_prompt(
     half: int,
     half_plus_one: int,
 ) -> str:
-    instance_id = task.get("instance_id", "unknown")
-    problem_statement = task.get("problem_statement", "")
+    feature_request = _feature_request(task)
     persona = _PERSONA_BLOCK.format(
         n_variants=n_variants,
         half_variants=half,
@@ -419,17 +439,21 @@ def _build_hybrid_prompt(
         "",
         "## Execution Steps (strictly in order)",
         "",
-        "### Step 1: Prepare workspace",
+        "### Step 1: Inspect the prepared workspace",
         "",
-        "Call `clarify_workspace_generate`. This will:",
-        "- Populate the workspace via the configured provider (feature request "
-        "+ any reference code)",
-        "- Create `<workspace>/klee/` directory for harness_writer",
+        "The business workspace has already been prepared by the caller. Do not "
+        "call a business workspace preparation tool and do not assume fixed "
+        "filenames or directories. Use the user request and current workspace "
+        "contents as the source of truth.",
         "",
-        "The emitted directory tree is the source of truth for what the "
-        "workspace contains.",
+        "### Step 2: Prepare KLEE scaffold",
         "",
-        "### Step 2: Serial — harness_writer",
+        "Call `clarify_prepare_klee`. This creates only OpenHands-clarify KLEE "
+        "support files under an internal scaffold directory; it does not create "
+        "or modify business/specification workspace content. Pass the returned "
+        "`scaffold_dir` to harness_writer.",
+        "",
+        "### Step 3: Serial — harness_writer",
         "",
         "Start the `clarify_harness_writer` sub-agent **once**:",
         "- This step is **serial** — wait for it to complete before proceeding",
@@ -437,13 +461,10 @@ def _build_hybrid_prompt(
         "file-by-file workflow; harness_writer's own instruction decides how to "
         "use `ls`, `grep`, and `cat` to gather evidence from whatever reference "
         "material the workspace provides.",
-        "- harness_writer reads `feature_request.md` + any workspace reference "
-        "code, infers a request-coverage-preserving symbolic input ABI for one "
-        "or more entry points, and writes:",
-        "  - `<workspace>/klee/core_abi.hpp` — shared ABI header, one "
-        "`// entry_point: <name>` tag per entry point",
-        "  - `<workspace>/klee/harness_<i>.cpp` — one shared symbolic driver "
-        "per entry point (fixed `klee_make_symbolic` calls)",
+        "- harness_writer reads the user request plus relevant workspace "
+        "materials, infers a request-coverage-preserving symbolic input ABI "
+        "for one or more entry points, and writes the shared KLEE scaffold at "
+        "the `scaffold_dir` returned by `clarify_prepare_klee`.",
         "- harness_writer returns a `fuzzy_design_report` capturing "
         "interface-level ambiguities (including when the request does not "
         "clearly delimit which interfaces are in scope)",
@@ -456,7 +477,7 @@ def _build_hybrid_prompt(
         "dependencies get mocked and how they behave remains open for each "
         "simulation_writer to decide independently.",
         "",
-        "### Step 3: Parallel — simulation_writer variants",
+        "### Step 4: Parallel — simulation_writer variants",
         "",
         f"Start **{n_variants} clarify_simulation_writer sub-agents in a "
         "single response** (parallel):",
@@ -481,7 +502,8 @@ def _build_hybrid_prompt(
         persona,
         "",
         "Each simulation_writer will independently:",
-        "1. Read `feature_request.md` + harness scaffold from `variant_dir`",
+        "1. Read the user request/specification material plus the harness "
+        "scaffold from `variant_dir`",
         "2. Decide which real repository/external interfaces to call and "
         "implement only those as `call_stub` stubs in `mock.cpp`",
         "3. Implement every tagged entry point's business logic in `mock.cpp`",
@@ -489,11 +511,12 @@ def _build_hybrid_prompt(
         "ktests that `clarify_cross_validation` will consume",
         "5. Return `fuzzy_design_report` and KLEE results",
         "",
-        "### Step 4: Cross-validation",
+        "### Step 5: Cross-validation",
         "",
         "After all variants complete, call `clarify_cross_validation` (no "
         "arguments). This tool:",
-        "1. Scans all `klee_<i>/` directories",
+        "1. Uses the variants claimed in Clarify state (or discovers internal "
+        "`klee_<i>/` directories)",
         "2. Merges all ktest files into a unified pool",
         "3. Replays each ktest against each variant",
         "4. Returns: statistics + divergence cluster analysis with decoded "
@@ -514,7 +537,7 @@ def _build_hybrid_prompt(
         "because it took a longer control-flow path or made an extra stub call. "
         "`.early` / `.err` truncated ktests are filtered before "
         "cross-validation, so treat this as behavior divergence evidence and "
-        "trace it to `mock.cpp` + `feature_request.md`.",
+        "trace it to `mock.cpp` + the request/specification material.",
         "",
         "The `clarify_cross_validation` return value will indicate whether to:",
         "- Do inline analysis (few clusters), or",
@@ -522,7 +545,7 @@ def _build_hybrid_prompt(
         "",
         "Follow its instructions.",
         "",
-        "### Step 5: Attribution (disambiguation_analyst if directed)",
+        "### Step 6: Attribution (disambiguation_analyst if directed)",
         "",
         "If `clarify_cross_validation` directs you to use "
         "`clarify_disambiguation_analyst`:",
@@ -539,19 +562,17 @@ def _build_hybrid_prompt(
         "`implementation_error` / `simulation_artifact`",
         "",
         "**Iron rule**: Do NOT read test_patch, gold_patch, f2p, or any test "
-        "files. Attribution is based solely on `feature_request.md` + mock.cpp "
-        "code + divergence data.",
+        "files. Attribution is based solely on the user-provided request/"
+        "specification, mock.cpp code, and divergence data.",
         "",
         _REPORT_FORMAT.format(ambiguity_classes=_AMBIGUITY_CLASSES),
         _IMPORTANT_RULES,
         "",
-        f"Instance ID: {instance_id}",
-        f"Repository: {task.get('repo', 'unknown')}",
-        f"Base commit: {task.get('base_commit', 'unknown')}",
         f"Clarify mode: {mode}",
+        *_task_context_lines(task),
         "",
         "Feature request:",
-        problem_statement,
+        feature_request,
     ]
     return "\n".join(lines)
 
@@ -563,15 +584,18 @@ _IMPORTANT_RULES = """\
    files. These are invisible to the method.
 2. **Serial before parallel**: harness_writer must complete before spawning
    simulation_writers.
-3. **Read before delegating**: Do not pre-read repo code yourself before
+3. **No web tools**: Do not use browser, web search, Tavily, or internet-fetch
+   tools. Use only the Clarify workspace and public reference files provided
+   there.
+4. **Read before delegating**: Do not pre-read repo code yourself before
    delegating to harness_writer or simulation_writer — they handle that.
-4. **Actionable ambiguity reporting**: Do not suggest code fixes. Do state the
+5. **Actionable ambiguity reporting**: Do not suggest code fixes. Do state the
    spec clarification question or decision needed to remove each ambiguity.
-5. **Persona diversity**: Use different decision tiebreakers across variant
+6. **Persona diversity**: Use different decision tiebreakers across variant
    groups to amplify spec ambiguity signal.
-6. **L2 is a first-class signal**: External call divergences (which functions
+7. **L2 is a first-class signal**: External call divergences (which functions
    variants chose to call) are as meaningful as behavioral divergences — do not
    dismiss them as noise.
-7. **Full report handoff**: The final `clarify_task_done.report` field must
+8. **Full report handoff**: The final `clarify_task_done.report` field must
    contain the full Feature Request Ambiguity Report, not just the summary
    section."""

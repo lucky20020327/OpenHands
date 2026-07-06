@@ -4,7 +4,7 @@ from openhands.sdk.tool.spec import Tool
 
 
 CLARIFY_TOOL_NAMES = (
-    "clarify_workspace_generate",
+    "clarify_prepare_klee",
     "clarify_claim_variant",
     "clarify_klee_solve",
     "clarify_cross_validation",

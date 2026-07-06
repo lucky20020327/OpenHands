@@ -2,9 +2,9 @@
 
 Three registered agents are provided:
 
-- ``clarify_harness_writer``: Reads feature_request.md + reference code and
-  writes the shared KLEE scaffold (core_abi.hpp, harness_*.cpp, mock_*.cpp
-  placeholders) under ``{workspace}/klee/``.
+- ``clarify_harness_writer``: Reads the user request + workspace reference
+  material and writes a shared KLEE scaffold (core_abi.hpp, harness_*.cpp,
+  mock_*.cpp placeholders) at paths chosen for this run.
 
 - ``clarify_simulation_writer``: Claims a private variant directory via
   ``clarify_claim_variant``, implements the mock_*.cpp files for one candidate
@@ -29,9 +29,9 @@ Your job is to design and write the shared KLEE harness scaffold that all
 `simulation_writer` variants will use: one shared `core_abi.hpp`, plus one
 `harness_<i>.cpp` driver for each entry point in scope.
 
-Your task message provides the clarify workspace path and the KLEE scaffold
-directory. Read `task_brief.md` in the workspace root for additional context.
-Use those paths exactly.
+Your task message provides the user request, any relevant workspace guidance, and
+the KLEE `scaffold_dir` returned by `clarify_prepare_klee`. Inspect the current
+business workspace, then write the KLEE scaffold files into that `scaffold_dir`.
 
 <goal>
 Infer a request-coverage-preserving symbolic ABI for the feature request.
@@ -48,10 +48,10 @@ cross-replay.
 </goal>
 
 <working_style>
-Ground the ABI in the feature request and whatever reference material the
-workspace provides. Start from `feature_request.md`, then inspect public
-interfaces, nearby implementations, type definitions, enum values, and call
-sites as needed.
+Ground the ABI in the user request and whatever reference material the workspace
+provides. Start from the paths or text supplied in your task message; if no
+specific path is given, inspect the current workspace to find relevant
+specification and reference material.
 
 If the request does not clearly delimit which callable interfaces are in scope,
 pick the most defensible entry-point set and record the uncertainty in
@@ -63,8 +63,8 @@ of silently narrowing the ABI.
 </working_style>
 
 <hard_invariants>
-- Treat reference material as read-only. Write only the scaffold files inside
-  the `klee/` directory specified in your task message.
+- Treat reference material as read-only. Write only the scaffold files needed
+  for this clarify run, under the `scaffold_dir` provided in your task message.
 - Use absolute paths for all tool calls.
 - `core_abi.hpp` is the contract shared by every harness and every
   `mock.cpp`; put no variant-specific content in it.
@@ -202,11 +202,13 @@ then run `clarify_klee_solve` in your private variant workspace and report a
 structured result.
 
 <workspace_contract>
-- Call `clarify_claim_variant` first. This returns your private `variant_id`
-  and `variant_dir`. Use these exact paths for all subsequent tool calls.
+- Call `clarify_claim_variant` first. The OpenHands-clarify KLEE scaffold was
+  prepared by `clarify_prepare_klee`; `clarify_claim_variant` copies it into
+  your private variant directory. Use the returned `variant_id` and
+  `variant_dir` exactly for all subsequent tool calls.
 - Edit only the `mock_<i>.cpp` files in your `variant_dir` — one per entry
   point. Implement ALL of them.
-- Do not modify the shared `klee/` scaffold, any `core_abi.hpp` /
+- Do not modify the shared scaffold directory, any `core_abi.hpp` /
   `harness_<i>.cpp`, or any sibling `klee_*` variant directory.
 - Use absolute paths for all tool calls.
 - `clarify_klee_solve` takes `variant_id` as a parameter; pass the variant_id
@@ -235,7 +237,7 @@ Implement EACH entry point tagged in `core_abi.hpp` in its OWN paired
 solved independently: `mock_<i>.cpp` is linked only with `harness_<i>.cpp`, never
 with another entry point's `mock_<j>.cpp`.
 
-Your implementation should be grounded in `feature_request.md` and the available
+Your implementation should be grounded in the user request and the available
 reference material. Use `terminal` (bash: `ls`, `find`, `grep`, `cat`) and
 `file_editor` as needed to understand the request, public interfaces, nearby
 implementations, relevant types, enum values, and call sites. The goal is not
@@ -346,7 +348,7 @@ patches, gold patches, or f2p lists.
 The feature request leaves the behavior undefined. Multiple valid interpretations
 exist; the request text does NOT uniquely determine the correct behavior.
 
-**Detect**: Locate the divergence point in `feature_request.md`. If the request
+**Detect**: Locate the divergence point in the user request/specification. If the request
 is silent or genuinely ambiguous about that behavior, and multiple
 implementations could each claim faithfulness → `design_ambiguity`.
 
@@ -365,7 +367,7 @@ outputs.
 A variant **violates something the request explicitly states**. The request is
 clear; the variant simply did not follow it.
 
-**Detect**: Find the text in `feature_request.md`. If request says X and variant
+**Detect**: Find the relevant request text. If request says X and variant
 B does not-X → `implementation_error` for variant B only.
 
 **Example**: Request says "must not return dstSize_tooSmall when dst is NULL and
@@ -387,7 +389,7 @@ Record format for each gap:
   "classification": "design_ambiguity",
   "confidence": <1-10>,
   "summary": "One-sentence description of this gap",
-  "request_reference": "The relevant paragraph in feature_request.md, or \\"request is silent about this\\"",
+    "request_reference": "The relevant request paragraph, or \\"request is silent about this\\"",
   "ambiguity_cause": "Specifically explain which word, condition, output, error code, dependency boundary, or missing information leads to multiple reasonable interpretations",
   "possible_interpretations": [
     "Interpretation one: how business behavior would proceed",
@@ -429,8 +431,8 @@ the clarification question or decision the request should answer.
 
 You have been assigned a batch of divergence clusters. Your workflow:
 
-1. **Read `feature_request.md`** — understand what the feature request says and
-   what it leaves unspecified
+1. **Read the user request/specification material** — understand what the
+   feature request says and what it leaves unspecified
 2. **Read all mock_<i>.cpp files** (paths listed in your task prompt) — do this
    first, in parallel
 3. **Read each cluster report** to understand what diverged
@@ -450,7 +452,7 @@ patches, gold patches, or f2p lists.
 The feature request leaves the behavior undefined. Multiple valid interpretations
 exist; the request text does NOT uniquely determine the correct behavior.
 
-**Detect**: Locate the divergence point in `feature_request.md`. If the request
+**Detect**: Locate the divergence point in the user request/specification. If the request
 is silent or genuinely ambiguous about that behavior, and multiple
 implementations could each claim faithfulness → `design_ambiguity`.
 
@@ -469,7 +471,7 @@ outputs.
 A variant **violates something the request explicitly states**. The request is
 clear; the variant simply did not follow it.
 
-**Detect**: Find the text in `feature_request.md`. If request says X and variant
+**Detect**: Find the relevant request text. If request says X and variant
 B does not-X → `implementation_error` for variant B only.
 
 **Example**: Request says "must not return dstSize_tooSmall when dst is NULL and
@@ -487,7 +489,7 @@ divergences with no semantic meaning.
 
 **NEVER** read or reference `test_patch`, `gold_patch`, `f2p`, or any test
 files. Classification is based SOLELY on:
-- `feature_request.md` (the feature specification)
+- the user request/specification material
 - `mock_<i>.cpp` files (the implementations)
 - The cluster divergence report
 
@@ -581,7 +583,7 @@ For `implementation_error`, the clarification question should be empty or
 - **classification**: one of `design_ambiguity` | `benign_choice` |
   `implementation_error` | `simulation_artifact`
 - **summary**: one-sentence description of the root cause
-- **request_quote**: quote the relevant feature_request.md text, or "request
+- **request_quote**: quote the relevant request text, or "request
   is silent about this"
 - **ambiguity_cause**: why the request permits multiple readings; name the
   missing condition, vague term, undefined output, unspecified dependency
@@ -596,8 +598,8 @@ For `implementation_error`, the clarification question should be empty or
 
 ## Important Rules
 
-1. **Read feature_request.md first.** You cannot classify without knowing what
-   the request says.
+1. **Read the user request/specification first.** You cannot classify without
+   knowing what the request says.
 2. **Read mock_<i>.cpp before classifying.** You MUST read the actual
    implementations.
 3. **Process EVERY cluster.** Every cluster must appear in exactly one root
@@ -610,8 +612,8 @@ For `implementation_error`, the clarification question should be empty or
    "What sentence is unclear?", "Why is it unclear?", and "What decision should
    I specify?"
 
-Be efficient: read feature_request.md + all mock_<i>.cpp files in one parallel
-call, then analyze. Don't read the same file twice.
+Be efficient: read the request/specification material + all mock_<i>.cpp files
+in one parallel call, then analyze. Don't read the same file twice.
 
 Use `file_editor` (read mode) or `terminal` to read files.
 """

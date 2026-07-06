@@ -153,6 +153,63 @@ _conversation_info_type_adapter = TypeAdapter(list[ConversationInfo | None])
 _logger = logging.getLogger(__name__)
 
 _EXPORT_LOCK_KEY_PREFIX = 'app_conversation_export'
+_CLARIFY_WEB_TOOL_NAME_PARTS = ('browser', 'tavily', 'web')
+
+
+def _clarify_disable_web_tools_enabled() -> bool:
+    return os.getenv('OPENHANDS_CLARIFY_DISABLE_WEB_TOOLS', '1') != '0'
+
+
+def _tool_name(tool: Any) -> str:
+    return str(getattr(tool, 'name', '') or '').lower()
+
+
+def _initial_message_text(initial_message: SendMessageRequest | None) -> str:
+    if initial_message is None:
+        return ''
+    chunks: list[str] = []
+    for item in getattr(initial_message, 'content', []) or []:
+        text = getattr(item, 'text', None)
+        if isinstance(text, str):
+            chunks.append(text)
+    return '\n'.join(chunks)
+
+
+def _is_clarify_conversation(
+    initial_message: SendMessageRequest | None,
+    system_message_suffix: str | None,
+) -> bool:
+    text = '\n'.join(
+        part
+        for part in (_initial_message_text(initial_message), system_message_suffix or '')
+        if part
+    )
+    return any(
+        marker in text
+        for marker in (
+            'Spec Ambiguity Analyst',
+            'Clarify mode:',
+            'Feature Request Ambiguity Report',
+        )
+    )
+
+
+def _without_web_tools_for_clarify(tools: Sequence[Any]) -> list[Any]:
+    return [
+        tool
+        for tool in tools
+        if not any(part in _tool_name(tool) for part in _CLARIFY_WEB_TOOL_NAME_PARTS)
+    ]
+
+
+def _remove_default_web_mcp_for_clarify(mcp_config: dict[str, Any]) -> None:
+    servers = mcp_config.get('mcpServers')
+    if not isinstance(servers, dict):
+        return
+    if servers.pop('default', None) is not None:
+        _logger.info('Disabled default web MCP server for Clarify conversation')
+    if not servers:
+        mcp_config.clear()
 
 
 class _StreamingZipBuffer(io.RawIOBase):
@@ -1697,6 +1754,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
         llm, mcp_config = await self._configure_llm_and_mcp(
             user, llm_model, conversation_id
         )
+        clarify_tools_enabled = os.getenv('OPENHANDS_CLARIFY_TOOLS', '1') != '0'
+        is_clarify_conversation = _is_clarify_conversation(
+            initial_message,
+            system_message_suffix,
+        )
+        clarify_disable_web_tools = (
+            clarify_tools_enabled
+            and is_clarify_conversation
+            and _clarify_disable_web_tools_enabled()
+        )
+        if clarify_disable_web_tools:
+            _remove_default_web_mcp_for_clarify(mcp_config)
 
         # --- system_message_suffix (planning-agent prefix) ------------------
         effective_suffix = system_message_suffix
@@ -1710,7 +1779,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
 
         # --- web host context -----------------------------------------------
         # Add WEB_HOST to agent context if available
-        if self.web_url:
+        if self.web_url and not clarify_disable_web_tools:
             web_host_context = f'<HOST>\n{self.web_url}\n</HOST>'
             if effective_suffix:
                 effective_suffix = f'{effective_suffix}\n\n{web_host_context}'
@@ -1725,12 +1794,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 plan_path = self._compute_plan_path(project_dir, git_provider)
             tools = get_planning_tools(plan_path=plan_path)
         else:
-            register_builtins_agents(enable_browser=True)
+            enable_browser = (
+                os.getenv('OPENHANDS_ENABLE_BROWSER', '1') != '0'
+                and not clarify_disable_web_tools
+            )
+            register_builtins_agents(enable_browser=enable_browser)
             tools = get_default_tools(
-                enable_browser=True,
+                enable_browser=enable_browser,
                 enable_sub_agents=user.agent_settings.enable_sub_agents,
             )
-            if os.getenv('OPENHANDS_CLARIFY_TOOLS', '1') != '0':
+            if clarify_disable_web_tools:
+                tools = _without_web_tools_for_clarify(tools)
+            if clarify_tools_enabled:
                 register_clarify_all()
                 tools.extend(get_clarify_tool_specs())
             if user.agent_settings.enable_sub_agents:

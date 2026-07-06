@@ -23,10 +23,10 @@ from openhands.clarify.tools.definitions import (
     ClarifyCrossValidationTool,
     ClarifyKleeSolveAction,
     ClarifyKleeSolveTool,
+    ClarifyPrepareKleeAction,
+    ClarifyPrepareKleeTool,
     ClarifyTaskDoneAction,
     ClarifyTaskDoneTool,
-    ClarifyWorkspaceGenerateAction,
-    ClarifyWorkspaceGenerateTool,
     _discover_klee_sh,
 )
 from openhands.sdk.tool.registry import list_registered_tools
@@ -67,70 +67,44 @@ def test_clarify_agents_are_registered():
         assert agent_name in registered_names, f"{agent_name!r} not registered"
 
 
-def test_workspace_generate_and_claim_variant(tmp_path):
+def test_prepare_klee_and_claim_variant(tmp_path):
     conv_state = _conv_state(tmp_path)
-    workspace_tool = _tool(ClarifyWorkspaceGenerateTool, conv_state)
+    prepare_tool = _tool(ClarifyPrepareKleeTool, conv_state)
     claim_tool = _tool(ClarifyClaimVariantTool, conv_state)
 
-    workspace_obs = workspace_tool(
-        ClarifyWorkspaceGenerateAction(
-            instance_id="owner__repo.abc.test_feature.deadbeef.lv1",
-            dataset="featurebench",
-            base_commit="abc",
-            feature_request="Add a fuzzy matching mode.",
-            repo="owner/repo",
-            language="c",
-            core_func="match_string",
-            entry_points=["int match_string(const char*, const char*)"],
-            n_variants=3,
-        )
+    prepare_obs = prepare_tool(
+        ClarifyPrepareKleeAction(task_id="case-1", metadata={"source": "unit"})
     )
+    scaffold = tmp_path / "repo" / ".openhands" / "clarify" / "klee"
+    (scaffold / "harness_0.cpp").write_text("int main(){return 0;}\n", encoding="utf-8")
     claim_obs = claim_tool(ClarifyClaimVariantAction(variant_name="strict"))
 
-    workspace = tmp_path / "repo" / ".openhands" / "clarify"
-    ws_dir = workspace / "owner__repo.abc.test_feature.deadbeef.lv1"
-    assert workspace_obs.is_error is False
-    assert ws_dir.is_dir()
-    # Rich metadata fields
-    import json as _json
-    meta = _json.loads((ws_dir / "metadata.json").read_text())
-    assert meta["repo"] == "owner/repo"
-    assert meta["language"] == "c"
-    assert meta["core_func"] == "match_string"
-    assert meta["n_variants"] == 3
-    # task_brief.md should exist
-    assert (ws_dir / "task_brief.md").is_file()
-    assert "match_string" in (ws_dir / "task_brief.md").read_text()
-    # workspace tree in obs text
-    assert "<workspace>" in workspace_obs.text
-    # claim variant
+    assert prepare_obs.is_error is False
+    assert (scaffold / "klee_helpers.hpp").is_file()
+    assert (scaffold / "KLEE_IMPLEMENTATION_RULES.md").is_file()
     assert claim_obs.data["variant_id"] == 1
-    assert (ws_dir / "klee_1").is_dir()
+    assert (tmp_path / "repo" / ".openhands" / "clarify" / "klee_1").is_dir()
 
 
 def test_klee_solve_reports_missing_klee_sh(tmp_path, monkeypatch):
     conv_state = _conv_state(tmp_path)
-    _tool(ClarifyWorkspaceGenerateTool, conv_state)(
-        ClarifyWorkspaceGenerateAction(
-            instance_id="case-1",
-            feature_request="Request",
-        )
+    _tool(ClarifyPrepareKleeTool, conv_state)(ClarifyPrepareKleeAction())
+    scaffold = tmp_path / "repo" / ".openhands" / "clarify" / "klee"
+    (scaffold / "harness_0.cpp").write_text(
+        "int main(){return 0;}\n",
+        encoding="utf-8",
     )
     claim_obs = _tool(ClarifyClaimVariantTool, conv_state)(
         ClarifyClaimVariantAction()
     )
     variant_dir = claim_obs.data["variant_dir"]
-    (tmp_path / "repo" / ".openhands" / "clarify" / "case-1" / "klee_1" / "harness_0.cpp").write_text(
-        "int main(){return 0;}\n",
-        encoding="utf-8",
-    )
     monkeypatch.delenv("KLEE_SH", raising=False)
     monkeypatch.delenv("OPENHANDS_CLARIFY_KLEE_SH", raising=False)
     monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(clarify_definitions, "_discover_klee_sh", lambda: None)
 
     obs = _tool(ClarifyKleeSolveTool, conv_state)(
-        ClarifyKleeSolveAction(variant_id=1)
+        ClarifyKleeSolveAction(variant_id=claim_obs.data["variant_id"])
     )
 
     assert obs.is_error is True
@@ -163,12 +137,6 @@ def test_klee_config_loads_vendored_defaults():
 
 def test_task_done_writes_report(tmp_path):
     conv_state = _conv_state(tmp_path)
-    _tool(ClarifyWorkspaceGenerateTool, conv_state)(
-        ClarifyWorkspaceGenerateAction(
-            instance_id="case-1",
-            feature_request="Request",
-        )
-    )
 
     obs = _tool(ClarifyTaskDoneTool, conv_state)(
         ClarifyTaskDoneAction(
@@ -178,7 +146,7 @@ def test_task_done_writes_report(tmp_path):
         )
     )
 
-    workspace = tmp_path / "repo" / ".openhands" / "clarify" / "case-1"
+    workspace = tmp_path / "repo"
     report_path = workspace / "clarify_report.json"
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     assert obs.is_error is False
@@ -194,25 +162,22 @@ def test_task_done_writes_report(tmp_path):
 def test_task_done_writes_trace_events(tmp_path):
     """Each tool call appends a trace event to trace.jsonl."""
     conv_state = _conv_state(tmp_path)
-    _tool(ClarifyWorkspaceGenerateTool, conv_state)(
-        ClarifyWorkspaceGenerateAction(
-            instance_id="case-trace",
-            feature_request="Request",
-        )
+    _tool(ClarifyPrepareKleeTool, conv_state)(ClarifyPrepareKleeAction())
+    scaffold = tmp_path / "repo" / ".openhands" / "clarify" / "klee"
+    _tool(ClarifyClaimVariantTool, conv_state)(
+        ClarifyClaimVariantAction()
     )
-    _tool(ClarifyClaimVariantTool, conv_state)(ClarifyClaimVariantAction())
     _tool(ClarifyTaskDoneTool, conv_state)(
         ClarifyTaskDoneAction(status="complete", summary="Done")
     )
 
-    workspace = tmp_path / "repo" / ".openhands" / "clarify" / "case-trace"
+    workspace = tmp_path / "repo"
     trace_path = workspace / "trace.jsonl"
     assert trace_path.is_file()
     events = [json.loads(line) for line in trace_path.read_text().splitlines() if line.strip()]
-    # workspace_generate, claim_variant, task_done → at least 3 events
-    assert len(events) >= 3
+    # claim_variant, task_done → at least 2 events
+    assert len(events) >= 2
     tools_seen = {e["tool"] for e in events}
-    assert "clarify_workspace_generate" in tools_seen
     assert "clarify_claim_variant" in tools_seen
     assert "clarify_task_done" in tools_seen
     # Every event should have a timestamp and elapsed_ms
@@ -223,13 +188,7 @@ def test_task_done_writes_trace_events(tmp_path):
 
 def test_cross_validation_builds_replay_matrix(tmp_path, monkeypatch):
     conv_state = _conv_state(tmp_path)
-    _tool(ClarifyWorkspaceGenerateTool, conv_state)(
-        ClarifyWorkspaceGenerateAction(
-            instance_id="case-1",
-            feature_request="Request",
-        )
-    )
-    workspace = tmp_path / "repo" / ".openhands" / "clarify" / "case-1"
+    workspace = tmp_path / "repo"
     for variant_id in (1, 2):
         variant = workspace / f"klee_{variant_id}"
         klee_out = variant / "out" / "klee-out"
@@ -280,7 +239,12 @@ def test_cross_validation_builds_replay_matrix(tmp_path, monkeypatch):
     monkeypatch.setattr(clarify_definitions.subprocess, "run", fake_run)
 
     obs = _tool(ClarifyCrossValidationTool, conv_state)(
-        ClarifyCrossValidationAction()
+        ClarifyCrossValidationAction(
+            variant_dirs=[
+                str(workspace / "klee_1"),
+                str(workspace / "klee_2"),
+            ]
+        )
     )
 
     summary = json.loads(
@@ -311,10 +275,10 @@ def test_cross_validation_builds_replay_matrix(tmp_path, monkeypatch):
 def test_artifact_schema_round_trip(tmp_path):
     """dump + write_report_json preserves all fields; HTML and md files are created."""
     payload = ClarifyReportPayload(
-        instance_id="owner__repo.abc.feat.deadbeef.lv1",
+        task_id="owner__repo.abc.feat.deadbeef.lv1",
         status="complete",
         summary="Found 2 ambiguities.",
-        dataset="featurebench",
+        metadata={"source": "featurebench"},
         report="## Ambiguities\n\n1. Strict vs fuzzy\n2. Error handling",
         clusters=[ClusterEntry(cluster_id=1, size=3, ktests=["t1", "t2", "t3"])],
     )
@@ -331,7 +295,7 @@ def test_artifact_schema_round_trip(tmp_path):
     assert md_path.is_file()
 
     data = json.loads(json_path.read_text())
-    assert data["instance_id"] == "owner__repo.abc.feat.deadbeef.lv1"
+    assert data["task_id"] == "owner__repo.abc.feat.deadbeef.lv1"
     assert data["status"] == "complete"
     assert data["clusters"][0]["cluster_id"] == 1
     assert report_is_complete(json_path)
@@ -357,7 +321,7 @@ def test_artifact_schema_report_is_complete_missing(tmp_path):
 def test_disambiguated_request_uses_ambiguity_section(tmp_path):
     """If report has an '## Ambiguit' section it is embedded verbatim."""
     payload = ClarifyReportPayload(
-        instance_id="case-1",
+        task_id="case-1",
         status="complete",
         summary="Done",
         report="Some intro\n\n## Ambiguities\n\n1. Foo\n2. Bar",

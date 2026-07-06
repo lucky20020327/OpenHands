@@ -36,11 +36,6 @@ if TYPE_CHECKING:
     from openhands.sdk.conversation.state import ConversationState
 
 
-CORE_ABI_PLACEHOLDER = """#pragma once
-// Placeholder shared ABI. The harness-writing step should replace this with
-// CoreInput/CoreOutput definitions and the core function declaration.
-"""
-
 _RESOURCES_DIR = Path(__file__).resolve().parent.parent / "klee" / "resources"
 
 
@@ -51,6 +46,11 @@ def _load_klee_resource(name: str, fallback: str) -> str:
     except OSError:
         return fallback
 
+
+CORE_ABI_PLACEHOLDER = """#pragma once
+// Placeholder shared ABI. The harness-writing step should replace this with
+// CoreInput/CoreOutput definitions and the core function declaration.
+"""
 
 KLEE_HELPERS_HPP: str = _load_klee_resource(
     "klee_helpers.hpp",
@@ -76,15 +76,6 @@ def _text_observation(
         command=command,
         data=data or {},
     )
-
-
-def _repo_root_from_working_dir(working_dir: str) -> Path:
-    return Path(working_dir).resolve()
-
-
-def _safe_name(value: str | None, fallback: str) -> str:
-    text = "".join(c if c.isalnum() or c in "._-" else "_" for c in (value or ""))
-    return text.strip("._-") or fallback
 
 
 def _truncate_tail(text: str, max_chars: int) -> str:
@@ -115,37 +106,6 @@ def _count_ktests(path: Path) -> int:
     if not path.is_dir():
         return 0
     return sum(1 for item in path.glob("test*.ktest") if item.is_file())
-
-
-def _build_workspace_tree(root: Path, max_depth: int = 3) -> str:
-    """Build a compact directory tree string limited to *max_depth* levels."""
-
-    def _tree_lines(dir_path: Path, prefix: str = "", depth: int = 0) -> list[str]:
-        if depth >= max_depth:
-            return [f"{prefix}..."]
-        try:
-            entries = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
-        except PermissionError:
-            return [f"{prefix}<permission denied>"]
-        entries = [e for e in entries if not e.name.startswith((".", "_"))]
-        lines: list[str] = []
-        for idx, entry in enumerate(entries):
-            is_last = idx == len(entries) - 1
-            connector = "└── " if is_last else "├── "
-            extension = "    " if is_last else "│   "
-            if entry.is_dir():
-                lines.append(f"{prefix}{connector}{entry.name}/")
-                child_max = depth + 1 if entry.name in {"repo", "testbed"} else max_depth
-                lines.extend(_tree_lines(entry, prefix + extension, child_max))
-            else:
-                lines.append(f"{prefix}{connector}{entry.name}")
-        return lines
-
-    result = ["<workspace>"]
-    result.extend(_tree_lines(root))
-    result.append("</workspace>")
-    return "\n".join(result)
-
 
 
 def _read_info_summary(info_path: Path) -> dict[str, Any]:
@@ -328,16 +288,25 @@ def _merge_variant_ktests(
 
 def _discover_solved_variants(workspace: Path) -> list[tuple[int, Path]]:
     variants: list[tuple[int, Path]] = []
-    for path in sorted(workspace.glob("klee_*")):
-        if not path.is_dir():
-            continue
-        try:
-            variant_id = int(path.name.split("_", 1)[1])
-        except (IndexError, ValueError):
-            continue
-        if _count_ktests(path / "out" / "klee-out") > 0:
-            variants.append((variant_id, path))
+    search_roots = [workspace, workspace / ".openhands" / "clarify"]
+    for root in search_roots:
+        for path in sorted(root.glob("klee_*")):
+            if not path.is_dir():
+                continue
+            try:
+                variant_id = int(path.name.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if _count_ktests(path / "out" / "klee-out") > 0:
+                variants.append((variant_id, path))
     return sorted(variants)
+
+
+def _resolve_user_path(path_text: str, *, base_dir: str) -> Path:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = Path(base_dir) / path
+    return path.resolve()
 
 
 def _write_failure_diagnostics(
@@ -434,36 +403,25 @@ class ClarifyObservation(Observation):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
-class ClarifyWorkspaceGenerateAction(Action):
-    instance_id: str = Field(description="Benchmark instance id.")
-    feature_request: str = Field(description="Public feature request text.")
-    dataset: str = Field(default="featurebench")
-    base_commit: str | None = None
-    repo: str | None = Field(
+class ClarifyPrepareKleeAction(Action):
+    scaffold_dir: str | None = Field(
         default=None,
-        description="Repository slug (e.g. owner/repo), if known.",
+        description=(
+            "Directory for OpenHands-clarify KLEE scaffold files. Defaults to "
+            "<current workspace>/.openhands/clarify/klee."
+        ),
     )
-    language: str | None = Field(
+    task_id: str | None = Field(
         default=None,
-        description="Primary programming language of the benchmark (e.g. 'python', 'c', 'java').",
+        description="Optional stable task identifier for reports.",
     )
-    core_func: str | None = Field(
-        default=None,
-        description="Name of the core function being specified (for C/C++ KLEE harness).",
+    metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional caller metadata to carry into Clarify state.",
     )
-    entry_points: list[str] = Field(
-        default_factory=list,
-        description="Entry-point function signatures, if available from dataset metadata.",
-    )
-    n_variants: int = Field(
-        default=2,
-        ge=1,
-        le=8,
-        description="Number of KLEE simulation variants to generate (default 2).",
-    )
-    workspace_name: str | None = Field(
-        default=None,
-        description="Optional workspace directory name under .openhands/clarify.",
+    overwrite: bool = Field(
+        default=False,
+        description="If true, replace existing KLEE support files.",
     )
 
 
@@ -472,12 +430,30 @@ class ClarifyClaimVariantAction(Action):
         default=None,
         description="Optional human-readable variant name.",
     )
+    scaffold_dir: str | None = Field(
+        default=None,
+        description=(
+            "Existing scaffold directory to copy for this variant. If omitted, "
+            "Clarify uses the scaffold prepared by clarify_prepare_klee."
+        ),
+    )
+    variant_root: str | None = Field(
+        default=None,
+        description=(
+            "Directory where variant directories should be created. If omitted, "
+            "Clarify uses the internal variant root prepared by clarify_prepare_klee."
+        ),
+    )
 
 
 class ClarifyKleeSolveAction(Action):
     variant_id: int | None = Field(
         default=None,
         description="Variant id returned by clarify_claim_variant. Defaults to 1.",
+    )
+    variant_dir: str | None = Field(
+        default=None,
+        description="Existing variant directory to solve, if not using a claimed variant id.",
     )
     max_seconds: int | None = Field(default=None, ge=1, le=1800)
     max_forks: int | None = Field(default=None, ge=1, le=1000000)
@@ -486,6 +462,14 @@ class ClarifyKleeSolveAction(Action):
 
 class ClarifyCrossValidationAction(Action):
     command: Literal["summarize"] = "summarize"
+    variant_dirs: list[str] = Field(
+        default_factory=list,
+        description="Explicit variant directories to cross-validate. Defaults to claimed variants.",
+    )
+    output_dir: str | None = Field(
+        default=None,
+        description="Directory for cross-validation artifacts. Defaults to <workspace>/cross_val.",
+    )
 
 
 class ClarifyTaskDoneAction(Action):
@@ -514,8 +498,8 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         conversation: "LocalConversation | None" = None,  # noqa: ARG002
     ) -> ClarifyObservation:
         t0 = time.monotonic()
-        if isinstance(action, ClarifyWorkspaceGenerateAction):
-            obs = self.workspace_generate(action)
+        if isinstance(action, ClarifyPrepareKleeAction):
+            obs = self.prepare_klee(action)
         elif isinstance(action, ClarifyClaimVariantAction):
             obs = self.claim_variant(action)
         elif isinstance(action, ClarifyKleeSolveAction):
@@ -549,128 +533,95 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         return obs
 
     def _workspace_path(self) -> Path | None:
-        """Return the current clarify workspace path, or None if not yet set."""
+        """Return the current user workspace path."""
         try:
             state = self._load()
             if state.workspace:
                 return Path(state.workspace)
         except Exception:  # noqa: BLE001
             pass
-        return None
+        return Path(self.working_dir)
 
-    def workspace_generate(
-        self, action: ClarifyWorkspaceGenerateAction
-    ) -> ClarifyObservation:
-        repo_root = _repo_root_from_working_dir(self.working_dir)
+    def prepare_klee(self, action: ClarifyPrepareKleeAction) -> ClarifyObservation:
         state = self._load()
-        workspace_name = action.workspace_name or _safe_name(
-            action.instance_id, "task"
+        workspace = self._workspace_path() or Path(self.working_dir)
+        scaffold_dir = (
+            _resolve_user_path(action.scaffold_dir, base_dir=str(workspace))
+            if action.scaffold_dir
+            else workspace / ".openhands" / "clarify" / "klee"
         )
-        workspace = repo_root / ".openhands" / "clarify" / workspace_name
-        klee_dir = workspace / "klee"
-        klee_dir.mkdir(parents=True, exist_ok=True)
+        scaffold_dir.mkdir(parents=True, exist_ok=True)
 
-        (workspace / "feature_request.md").write_text(
-            action.feature_request.strip() + "\n",
-            encoding="utf-8",
-        )
-        metadata: dict[str, Any] = {
-            "instance_id": action.instance_id,
-            "dataset": action.dataset,
-            "base_commit": action.base_commit,
-            "repo": action.repo,
-            "language": action.language,
-            "core_func": action.core_func,
-            "entry_points": action.entry_points,
-            "n_variants": action.n_variants,
-            "repo_path": str(repo_root),
+        support_files = {
+            "core_abi.hpp": CORE_ABI_PLACEHOLDER,
+            "klee_helpers.hpp": KLEE_HELPERS_HPP,
+            "KLEE_IMPLEMENTATION_RULES.md": KLEE_RULES,
         }
-        # Strip None values for cleaner metadata.json
-        metadata = {k: v for k, v in metadata.items() if v is not None}
-        (workspace / "metadata.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        (klee_dir / "core_abi.hpp").write_text(CORE_ABI_PLACEHOLDER, encoding="utf-8")
-        (klee_dir / "klee_helpers.hpp").write_text(KLEE_HELPERS_HPP, encoding="utf-8")
-        (klee_dir / "KLEE_IMPLEMENTATION_RULES.md").write_text(
-            KLEE_RULES,
-            encoding="utf-8",
-        )
-
-        # Write a task brief that summarises important context for sub-agents.
-        brief_lines = [
-            f"# Task Brief: {action.instance_id}",
-            "",
-            f"**Dataset:** {action.dataset}",
-        ]
-        if action.repo:
-            brief_lines.append(f"**Repo:** {action.repo}")
-        if action.base_commit:
-            brief_lines.append(f"**Base commit:** {action.base_commit}")
-        if action.language:
-            brief_lines.append(f"**Language:** {action.language}")
-        if action.core_func:
-            brief_lines.append(f"**Core function:** `{action.core_func}`")
-        if action.entry_points:
-            brief_lines.append(
-                f"**Entry points:** {', '.join(f'`{e}`' for e in action.entry_points)}"
-            )
-        brief_lines.extend([
-            f"**Variants to generate:** {action.n_variants}",
-            "",
-            "## Feature Request",
-            "",
-            action.feature_request.strip(),
-        ])
-        (workspace / "task_brief.md").write_text(
-            "\n".join(brief_lines) + "\n", encoding="utf-8"
-        )
+        written: list[str] = []
+        for name, content in support_files.items():
+            path = scaffold_dir / name
+            if action.overwrite or not path.exists():
+                path.write_text(content, encoding="utf-8")
+                written.append(str(path))
 
         state.workspace = str(workspace)
-        state.repo_path = str(repo_root)
-        state.instance_id = action.instance_id
-        state.dataset = action.dataset
-        state.base_commit = action.base_commit
-        state.n_variants = action.n_variants
+        if action.task_id:
+            state.task_id = action.task_id
+        if action.metadata:
+            state.metadata.update(action.metadata)
+        state.metadata["klee_scaffold_dir"] = str(scaffold_dir)
+        state.metadata.setdefault(
+            "variant_root",
+            str(workspace / ".openhands" / "clarify"),
+        )
         self._save(state)
 
-        workspace_tree = _build_workspace_tree(workspace)
-        text = (
-            "Clarify workspace prepared.\n"
-            f"workspace: {workspace}\n"
-            f"klee scaffold: {klee_dir}\n\n"
-            f"Workspace tree:\n{workspace_tree}\n\n"
-            "Next steps:\n"
-            "1. Read feature_request.md (or task_brief.md) for full task context.\n"
-            "2. Write the shared KLEE harness: edit klee/core_abi.hpp with CoreInput/"
-            "CoreOutput types, create klee/harness_0.cpp + klee/mock_0.cpp.\n"
-            "3. Call clarify_claim_variant to create each isolated simulation directory.\n"
-            "4. Write implementation variants and call clarify_klee_solve for each.\n"
-            "5. Call clarify_cross_validation after all variants are solved.\n"
-            "6. Call clarify_task_done with the final ambiguity analysis."
-        )
         return _text_observation(
-            text,
-            command="clarify_workspace_generate",
-            data={"workspace": str(workspace), "klee_dir": str(klee_dir), **metadata},
+            "Clarify KLEE scaffold prepared.\n"
+            f"scaffold_dir: {scaffold_dir}\n"
+            f"written_files: {len(written)}",
+            command="clarify_prepare_klee",
+            data={
+                "workspace": str(workspace),
+                "scaffold_dir": str(scaffold_dir),
+                "written_files": written,
+            },
         )
 
     def claim_variant(self, action: ClarifyClaimVariantAction) -> ClarifyObservation:
         state = self._load()
-        if not state.workspace:
-            return _text_observation(
-                "workspace is not set. Run clarify_workspace_generate first.",
-                is_error=True,
-                command="clarify_claim_variant",
-            )
-        workspace = Path(state.workspace)
+        workspace = self._workspace_path() or Path(self.working_dir)
+        state.workspace = str(workspace)
         variant_id = state.next_variant_id
         state.next_variant_id += 1
-        variant_dir = workspace / f"klee_{variant_id}"
+        scaffold_text = action.scaffold_dir or str(
+            state.metadata.get("klee_scaffold_dir") or ""
+        )
+        if not scaffold_text:
+            return _text_observation(
+                "No KLEE scaffold directory is available. Call clarify_prepare_klee "
+                "first.",
+                is_error=True,
+                command="clarify_claim_variant",
+                data={"workspace": str(workspace), "variant_id": variant_id},
+            )
+        scaffold_dir = _resolve_user_path(scaffold_text, base_dir=state.workspace)
+        if not scaffold_dir.is_dir():
+            return _text_observation(
+                f"Scaffold directory does not exist: {scaffold_dir}",
+                is_error=True,
+                command="clarify_claim_variant",
+                data={"workspace": str(workspace), "scaffold_dir": str(scaffold_dir)},
+            )
+        variant_root_text = action.variant_root or str(
+            state.metadata.get("variant_root") or state.workspace
+        )
+        variant_root = _resolve_user_path(variant_root_text, base_dir=state.workspace)
+        variant_root.mkdir(parents=True, exist_ok=True)
+        variant_dir = variant_root / f"klee_{variant_id}"
         if variant_dir.exists():
             shutil.rmtree(variant_dir)
-        shutil.copytree(workspace / "klee", variant_dir)
+        shutil.copytree(scaffold_dir, variant_dir)
         state.variants[str(variant_id)] = str(variant_dir)
         self._save(state)
         return _text_observation(
@@ -680,17 +631,14 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
                 "variant_id": variant_id,
                 "variant_dir": str(variant_dir),
                 "variant_name": action.variant_name,
+                "scaffold_dir": str(scaffold_dir),
             },
         )
 
     def klee_solve(self, action: ClarifyKleeSolveAction) -> ClarifyObservation:
         state = self._load()
-        if not state.workspace:
-            return _text_observation(
-                "workspace is not set. Run clarify_workspace_generate first.",
-                is_error=True,
-                command="clarify_klee_solve",
-            )
+        workspace = self._workspace_path() or Path(self.working_dir)
+        state.workspace = str(workspace)
         cfg = get_klee_config()
         max_seconds = action.max_seconds or cfg.solve.max_seconds
         max_forks = action.max_forks or cfg.solve.max_forks
@@ -698,10 +646,19 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
             action.timeout_seconds or max_seconds + cfg.solve.timeout_buffer_sec
         )
         variant_id = action.variant_id or 1
-        variant_dir = Path(
-            state.variants.get(str(variant_id))
-            or Path(state.workspace) / f"klee_{variant_id}"
-        )
+        if action.variant_dir:
+            variant_dir = _resolve_user_path(action.variant_dir, base_dir=str(workspace))
+        else:
+            variant_path = state.variants.get(str(variant_id))
+            if not variant_path:
+                return _text_observation(
+                    "No variant directory specified. Pass variant_dir or use a "
+                    "variant_id returned by clarify_claim_variant.",
+                    is_error=True,
+                    command="clarify_klee_solve",
+                    data={"variant_id": variant_id},
+                )
+            variant_dir = Path(variant_path)
         if not variant_dir.is_dir():
             return _text_observation(
                 f"variant directory not found: {variant_dir}",
@@ -817,15 +774,27 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         self, action: ClarifyCrossValidationAction  # noqa: ARG002
     ) -> ClarifyObservation:
         state = self._load()
-        if not state.workspace:
-            return _text_observation(
-                "workspace is not set. Run clarify_workspace_generate first.",
-                is_error=True,
-                command="clarify_cross_validation",
-            )
-        workspace = Path(state.workspace)
+        workspace = self._workspace_path() or Path(self.working_dir)
+        state.workspace = str(workspace)
         cfg = get_klee_config()
-        variants = _discover_solved_variants(workspace)
+        if action.variant_dirs:
+            variants = [
+                (idx + 1, _resolve_user_path(path, base_dir=state.workspace))
+                for idx, path in enumerate(action.variant_dirs)
+            ]
+        else:
+            variants = [
+                (int(variant_id), Path(path))
+                for variant_id, path in sorted(
+                    state.variants.items(),
+                    key=lambda item: int(item[0]),
+                )
+            ]
+        variants = [
+            (variant_id, path)
+            for variant_id, path in variants
+            if path.is_dir() and _count_ktests(path / "out" / "klee-out") > 0
+        ]
         if len(variants) < 2:
             return _text_observation(
                 "Need at least two solved variants with test*.ktest files before "
@@ -845,7 +814,11 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
                 command="clarify_cross_validation",
                 data={"workspace": str(workspace)},
             )
-        cross_val_dir = workspace / "cross_val"
+        cross_val_dir = (
+            _resolve_user_path(action.output_dir, base_dir=state.workspace)
+            if action.output_dir
+            else workspace / "cross_val"
+        )
         if cross_val_dir.exists():
             shutil.rmtree(cross_val_dir)
         cross_val_dir.mkdir(parents=True, exist_ok=True)
@@ -1020,87 +993,79 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
         disambig_path = None
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-        if state.workspace:
-            workspace = Path(state.workspace)
+        workspace = self._workspace_path() or Path(self.working_dir)
+        state.workspace = str(workspace)
+        self._save(state)
 
-            # Build cluster list from cross-validation output if available.
-            clusters: list[ClusterEntry] = []
-            cluster_summary_path = workspace / "cross_val" / "cluster_summary.json"
-            if cluster_summary_path.is_file():
-                try:
-                    cs = json.loads(cluster_summary_path.read_text(encoding="utf-8"))
-                    for c in cs.get("clusters", []):
-                        clusters.append(
-                            ClusterEntry(
-                                cluster_id=c.get("cluster_id", 0),
-                                size=c.get("size", 0),
-                                ktests=c.get("ktests", [])[:50],
-                                path=str(c.get("path", "")),
-                                signatures_by_variant=c.get("signatures_by_variant", {}),
-                            )
+        # Build cluster list from cross-validation output if available.
+        clusters: list[ClusterEntry] = []
+        cluster_summary_path = workspace / "cross_val" / "cluster_summary.json"
+        if cluster_summary_path.is_file():
+            try:
+                cs = json.loads(cluster_summary_path.read_text(encoding="utf-8"))
+                for c in cs.get("clusters", []):
+                    clusters.append(
+                        ClusterEntry(
+                            cluster_id=c.get("cluster_id", 0),
+                            size=c.get("size", 0),
+                            ktests=c.get("ktests", [])[:50],
+                            path=str(c.get("path", "")),
+                            signatures_by_variant=c.get("signatures_by_variant", {}),
                         )
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Read trace events already written by prior tool calls.
+        tool_runs: list[ToolRunEvent] = []
+        trace_path = workspace / "trace.jsonl"
+        if trace_path.is_file():
+            for line in trace_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    tool_runs.append(
+                        ToolRunEvent(
+                            tool=ev.get("tool", ""),
+                            timestamp=ev.get("timestamp", ""),
+                            elapsed_ms=float(ev.get("elapsed_ms", 0)),
+                            is_error=bool(ev.get("is_error", False)),
+                            returncode=ev.get("returncode"),
+                            data={
+                                k: v
+                                for k, v in ev.get("data", {}).items()
+                                if k in ("variant_id", "variant_dir", "ktest_count", "workspace")
+                            },
+                        )
+                    )
                 except Exception:  # noqa: BLE001
                     pass
 
-            # Read trace events already written by prior tool calls.
-            tool_runs: list[ToolRunEvent] = []
-            trace_path = workspace / "trace.jsonl"
-            if trace_path.is_file():
-                for line in trace_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                        tool_runs.append(
-                            ToolRunEvent(
-                                tool=ev.get("tool", ""),
-                                timestamp=ev.get("timestamp", ""),
-                                elapsed_ms=float(ev.get("elapsed_ms", 0)),
-                                is_error=bool(ev.get("is_error", False)),
-                                returncode=ev.get("returncode"),
-                                data={
-                                    k: v
-                                    for k, v in ev.get("data", {}).items()
-                                    if k in ("variant_id", "variant_dir", "ktest_count", "workspace")
-                                },
-                            )
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
+        payload = ClarifyReportPayload(
+            task_id=state.task_id or Path(self.working_dir).name,
+            metadata=state.metadata,
+            mode="hybrid",
+            status=action.status,
+            summary=action.summary,
+            report=action.report,
+            clusters=clusters,
+            tool_runs=tool_runs,
+            workspace=str(workspace),
+            finished_at=now_iso,
+            state={
+                k: v
+                for k, v in (state.__dict__ if hasattr(state, "__dict__") else {}).items()
+                if not k.startswith("_") and k != "state_path"
+            },
+        )
 
-            # Collect metadata.
-            metadata: dict[str, Any] = {}
-            metadata_path = workspace / "metadata.json"
-            if metadata_path.is_file():
-                try:
-                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001
-                    pass
-
-            payload = ClarifyReportPayload(
-                instance_id=state.instance_id or metadata.get("instance_id", ""),
-                dataset=state.dataset or metadata.get("dataset", "featurebench"),
-                mode="hybrid",
-                status=action.status,
-                summary=action.summary,
-                report=action.report,
-                clusters=clusters,
-                tool_runs=tool_runs,
-                workspace=str(workspace),
-                finished_at=now_iso,
-                state={
-                    k: v
-                    for k, v in (state.__dict__ if hasattr(state, "__dict__") else {}).items()
-                    if not k.startswith("_") and k != "state_path"
-                },
-            )
-
-            report_path = write_report_json(payload, workspace / "clarify_report.json")
-            html_path = write_report_html(payload, workspace / "clarify_report.html")
-            disambig_path = write_disambiguated_request(
-                payload, workspace / "disambiguated_request.md"
-            )
+        report_path = write_report_json(payload, workspace / "clarify_report.json")
+        html_path = write_report_html(payload, workspace / "clarify_report.html")
+        disambig_path = write_disambiguated_request(
+            payload, workspace / "disambiguated_request.md"
+        )
 
         return _text_observation(
             f"Clarify task marked {action.status}: {action.summary}",
@@ -1148,15 +1113,15 @@ class _ClarifyBaseTool(ToolDefinition[Action, ClarifyObservation]):
         ]
 
 
-class ClarifyWorkspaceGenerateTool(_ClarifyBaseTool):
-    name = "clarify_workspace_generate"
+class ClarifyPrepareKleeTool(_ClarifyBaseTool):
+    name = "clarify_prepare_klee"
 
     @classmethod
-    def create(cls, conv_state: "ConversationState") -> Sequence["ClarifyWorkspaceGenerateTool"]:
+    def create(cls, conv_state: "ConversationState") -> Sequence["ClarifyPrepareKleeTool"]:
         return cls._create_with_action(
             conv_state,
-            ClarifyWorkspaceGenerateAction,
-            "Create a standalone Clarify workspace and KLEE scaffold for this task.",
+            ClarifyPrepareKleeAction,
+            "Prepare OpenHands-clarify KLEE support files in an internal scaffold directory.",
             destructive=False,
         )
 
@@ -1217,7 +1182,7 @@ class ClarifyTaskDoneTool(_ClarifyBaseTool):
 
 
 for _tool_cls in (
-    ClarifyWorkspaceGenerateTool,
+    ClarifyPrepareKleeTool,
     ClarifyClaimVariantTool,
     ClarifyKleeSolveTool,
     ClarifyCrossValidationTool,

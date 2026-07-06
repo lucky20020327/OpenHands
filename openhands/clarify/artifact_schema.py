@@ -90,10 +90,10 @@ class ToolRunEvent:
 class ClarifyReportPayload:
     """Full clarify report written as ``clarify_report.json``."""
 
-    instance_id: str
+    task_id: str
     status: str
     summary: str
-    dataset: str = "featurebench"
+    metadata: dict[str, Any] = field(default_factory=dict)
     mode: str = "hybrid"
     report: str = ""
     ambiguities: list[AmbiguityEntry] = field(default_factory=list)
@@ -202,8 +202,7 @@ def write_report_html(payload: ClarifyReportPayload, path: Path | str) -> Path:
     meta_rows = "\n".join(
         f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>"
         for k, v in [
-            ("instance_id", payload.instance_id),
-            ("dataset", payload.dataset),
+            ("task_id", payload.task_id),
             ("mode", payload.mode),
             ("status", payload.status),
             ("workspace", payload.workspace or ""),
@@ -227,7 +226,7 @@ def write_report_html(payload: ClarifyReportPayload, path: Path | str) -> Path:
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Clarify Report - {escape(payload.instance_id)}</title>
+  <title>Clarify Report - {escape(payload.task_id)}</title>
   <style>
     body {{
       color: #1f2937;
@@ -284,7 +283,7 @@ def write_disambiguated_request(
     lines: list[str] = [
         f"# Disambiguated Feature Request",
         f"",
-        f"**Instance:** {payload.instance_id}",
+        f"**Task:** {payload.task_id}",
         f"**Status:** {payload.status}",
         f"",
         f"---",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -14,16 +14,14 @@ _LOCK = threading.RLock()
 class ClarifyState:
     state_path: str
     workspace: str | None = None
-    repo_path: str | None = None
-    instance_id: str | None = None
-    dataset: str | None = None
-    base_commit: str | None = None
+    task_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     next_variant_id: int = 1
     variants: dict[str, str] = field(default_factory=dict)
     task_done_status: str | None = None
     task_done_summary: str | None = None
     task_done_report: str | None = None
-    n_variants: int = 2
+    n_variants: int = 4
 
 
 def state_path_for(*, persistence_dir: str | None, working_dir: str) -> Path:
@@ -38,6 +36,9 @@ def load_state(path: Path) -> ClarifyState:
         data = json.loads(path.read_text(encoding="utf-8"))
         data.setdefault("state_path", str(path))
         data.setdefault("variants", {})
+        data.setdefault("metadata", {})
+        allowed = {item.name for item in fields(ClarifyState)}
+        data = {key: value for key, value in data.items() if key in allowed}
         return ClarifyState(**data)
 
 
