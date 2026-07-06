@@ -59,6 +59,12 @@ def main(argv: list[str] | None = None) -> None:
         setup_clarify_llm()
     except Exception:  # noqa: BLE001 - never block the agent server from starting
         pass
+    try:
+        from openhands.clarify.tools import register_clarify_tools
+
+        register_clarify_tools()
+    except Exception:  # noqa: BLE001 - never block the agent server from starting
+        pass
 
     # Reconstruct argv so the wrapped module behaves exactly like ``-m module``.
     sys.argv = [module, *forwarded]

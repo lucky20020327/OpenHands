@@ -1,0 +1,23 @@
+# 可选镜像：把 klee_interface/solve_workspace.sh 烘焙进官方 KLEE 镜像，
+# 这样 ./klee.sh start 不再需要 docker cp 安装 solver。
+#
+# 构建:
+#   ./klee.sh build-image
+#   # 或：docker build -f Dockerfile.klee -t klee/solver-with-workspace:latest .
+#
+# 使用:
+#   export KLEE_IMAGE=klee/solver-with-workspace:latest
+#   ./klee.sh rm && ./klee.sh start
+#
+# 切换基础镜像（例如固定到 sha256 / 版本 tag）:
+#   docker build -f Dockerfile.klee --build-arg KLEE_BASE_IMAGE=klee/klee:3.1 -t klee/solver-with-workspace:3.1 .
+
+ARG KLEE_BASE_IMAGE=klee/klee:latest
+FROM ${KLEE_BASE_IMAGE}
+
+USER root
+COPY klee_interface/solve_workspace.sh  /usr/local/bin/klee_solve_workspace.sh
+COPY klee_interface/replay_workspace.sh /usr/local/bin/klee_replay_workspace.sh
+RUN chmod 755 /usr/local/bin/klee_solve_workspace.sh /usr/local/bin/klee_replay_workspace.sh
+
+USER klee

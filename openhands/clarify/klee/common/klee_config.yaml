@@ -1,0 +1,25 @@
+# KLEE runtime configuration for OpenHands Clarify.
+# This fork keeps the active runtime knobs local so the clarify tools can run
+# without importing the parent repository's clarify package.
+
+solve:
+  max_seconds: 180
+  max_forks: 50000
+  only-output-states-covering-new: false
+  timeout_buffer_sec: 180
+  search:
+    - dfs
+    - nurs:covnew
+  use-batching-search: true
+  batch-instructions: 1000
+  max-memory-mb: 16000
+
+cross_validation:
+  replay_parallel: 4
+  replay_timeout_min_sec: 300
+  replay_sec_per_ktest: 2
+  replay_timeout_max_sec: 3600
+  max_ktests_per_variant: 300
+
+runner:
+  stderr_tail_bytes: 4000

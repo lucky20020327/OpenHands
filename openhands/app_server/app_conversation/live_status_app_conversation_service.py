@@ -114,6 +114,7 @@ from openhands.app_server.utils.docker_utils import (
 from openhands.app_server.utils.git import ensure_valid_git_branch_name
 from openhands.app_server.utils.import_utils import get_impl
 from openhands.app_server.utils.clarify_llm import apply_clarify_llm_overrides
+from openhands.clarify.tools import get_clarify_tool_specs, register_clarify_tools
 from openhands.app_server.utils.llm_metadata import (
     get_llm_metadata,
     should_set_litellm_extra_body,
@@ -1729,6 +1730,9 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 enable_browser=True,
                 enable_sub_agents=user.agent_settings.enable_sub_agents,
             )
+            if os.getenv('OPENHANDS_CLARIFY_TOOLS', '1') != '0':
+                register_clarify_tools()
+                tools.extend(get_clarify_tool_specs())
             if user.agent_settings.enable_sub_agents:
                 agent_definitions = list(get_registered_agent_definitions())
 
