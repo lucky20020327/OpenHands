@@ -14,8 +14,6 @@ Tool-name mapping vs. the ADK version:
 
 from __future__ import annotations
 
-import json
-
 __all__ = ["build_orchestrator_prompt"]
 
 _AMBIGUITY_CLASSES = """\
@@ -97,7 +95,7 @@ When calling `clarify_task_done`:
 
 ### Feature Request Ambiguity Report
 
-**Feature**: [task_id + one-line description]
+**Feature**: [feature identifier + one-line description]
 **Entry point(s)**: [names of the entry points modeled]
 **Analysis scope**: [briefly describe modeled entry points and any important
 uncovered areas]
@@ -186,17 +184,20 @@ When the feature request is silent about a behavior and no other context resolve
 
 
 def build_orchestrator_prompt(
-    task: dict,
     mode: str = "hybrid",
     n_variants: int = 4,
 ) -> str:
-    """Build the full Clarify orchestrator prompt for OpenHands.
+    """Build the Clarify orchestrator instruction for OpenHands.
+
+    This is a pure agent instruction describing **how** to run the Clarify
+    ambiguity-analysis pipeline. It is intentionally decoupled from any task
+    schema: the concrete user request (feature description plus its
+    development context / workspace) is supplied separately as the
+    conversation's user message by the caller. The instruction only tells the
+    agent to work from "the user request" and the current workspace.
 
     Parameters
     ----------
-    task:
-        Task dict with at minimum ``task_id`` and ``feature_request``.
-        May also contain opaque ``metadata`` supplied by the caller.
     mode:
         One of ``"hybrid"`` (default), ``"bold"``, ``"self_check_only"``,
         ``"difference_only"``.
@@ -209,50 +210,25 @@ def build_orchestrator_prompt(
 
     header = (
         "You are a **Spec Ambiguity Analyst** for software feature requests. "
-        "Your mission: generate N independent C simulations of a feature "
-        "request, cross-validate their behavior using KLEE symbolic execution, "
-        "and produce an ambiguity report that helps the feature-request author "
+        "Your mission: produce an ambiguity report that helps the feature-request author "
         "understand what is unclear and what decision would disambiguate it. "
         "Do not suggest code fixes; do include clarification questions or "
         "specification decisions."
     )
 
     if mode == "bold":
-        return _build_bold_prompt(task, header)
+        return _build_bold_prompt(header)
     if mode == "self_check_only":
-        return _build_self_check_only_prompt(task, header, n_variants, half, half_plus_one)
+        return _build_self_check_only_prompt(header, n_variants, half, half_plus_one)
     # hybrid (default) and difference_only both use the full KLEE pipeline
-    return _build_hybrid_prompt(task, header, mode, n_variants, half, half_plus_one)
-
-
-def _task_id(task: dict) -> str:
-    return str(task.get("task_id") or "unknown")
-
-
-def _feature_request(task: dict) -> str:
-    return str(task.get("feature_request") or "")
-
-
-def _task_context_lines(task: dict) -> list[str]:
-    lines = [f"Task ID: {_task_id(task)}"]
-    metadata = task.get("metadata")
-    if isinstance(metadata, dict) and metadata:
-        lines.extend([
-            "Metadata:",
-            "```json",
-            json.dumps(metadata, ensure_ascii=False, indent=2),
-            "```",
-        ])
-    return lines
+    return _build_hybrid_prompt(header, mode, n_variants, half, half_plus_one)
 
 
 # ---------------------------------------------------------------------------
 # Mode builders
 # ---------------------------------------------------------------------------
 
-def _build_bold_prompt(task: dict, header: str) -> str:
-    feature_request = _feature_request(task)
-
+def _build_bold_prompt(header: str) -> str:
     lines = [
         header,
         "",
@@ -300,23 +276,16 @@ def _build_bold_prompt(task: dict, header: str) -> str:
         "4. **Full report handoff**: The final `clarify_task_done.report` field "
         "must contain the full Feature Request Ambiguity Report, not just the "
         "summary section.",
-        "",
-        *_task_context_lines(task),
-        "",
-        "Feature request:",
-        feature_request,
     ]
     return "\n".join(lines)
 
 
 def _build_self_check_only_prompt(
-    task: dict,
     header: str,
     n_variants: int,
     half: int,
     half_plus_one: int,
 ) -> str:
-    feature_request = _feature_request(task)
     persona = _PERSONA_BLOCK.format(
         n_variants=n_variants,
         half_variants=half,
@@ -392,24 +361,17 @@ def _build_self_check_only_prompt(
         "",
         _REPORT_FORMAT.format(ambiguity_classes=_AMBIGUITY_CLASSES),
         _IMPORTANT_RULES,
-        "",
-        *_task_context_lines(task),
-        "",
-        "Feature request:",
-        feature_request,
     ]
     return "\n".join(lines)
 
 
 def _build_hybrid_prompt(
-    task: dict,
     header: str,
     mode: str,
     n_variants: int,
     half: int,
     half_plus_one: int,
 ) -> str:
-    feature_request = _feature_request(task)
     persona = _PERSONA_BLOCK.format(
         n_variants=n_variants,
         half_variants=half,
@@ -569,10 +531,6 @@ def _build_hybrid_prompt(
         _IMPORTANT_RULES,
         "",
         f"Clarify mode: {mode}",
-        *_task_context_lines(task),
-        "",
-        "Feature request:",
-        feature_request,
     ]
     return "\n".join(lines)
 
