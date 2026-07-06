@@ -60,9 +60,9 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:  # noqa: BLE001 - never block the agent server from starting
         pass
     try:
-        from openhands.clarify.tools import register_clarify_tools
+        from openhands.clarify.tools import register_clarify_all
 
-        register_clarify_tools()
+        register_clarify_all()
     except Exception:  # noqa: BLE001 - never block the agent server from starting
         pass
 

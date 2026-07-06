@@ -4,7 +4,7 @@ import json
 import subprocess
 from types import SimpleNamespace
 
-from openhands.clarify.tools import CLARIFY_TOOL_NAMES, get_clarify_tool_specs
+from openhands.clarify.tools import CLARIFY_TOOL_NAMES, CLARIFY_AGENT_NAMES, get_clarify_tool_specs
 from openhands.clarify.klee.config import get_klee_config, reset_klee_config
 import openhands.clarify.tools.definitions as clarify_definitions
 from openhands.clarify.artifact_schema import (
@@ -55,6 +55,18 @@ def test_clarify_tools_are_registered():
     assert set(CLARIFY_TOOL_NAMES).issubset(registered)
 
 
+def test_clarify_agents_are_registered():
+    """register_clarify_agents() registers all three sub-agent definitions."""
+    from openhands.clarify.tools import register_clarify_agents
+    from openhands.sdk.subagent import get_registered_agent_definitions
+
+    register_clarify_agents()
+
+    registered_names = {defn.name for defn in get_registered_agent_definitions()}
+    for agent_name in CLARIFY_AGENT_NAMES:
+        assert agent_name in registered_names, f"{agent_name!r} not registered"
+
+
 def test_workspace_generate_and_claim_variant(tmp_path):
     conv_state = _conv_state(tmp_path)
     workspace_tool = _tool(ClarifyWorkspaceGenerateTool, conv_state)
@@ -66,15 +78,34 @@ def test_workspace_generate_and_claim_variant(tmp_path):
             dataset="featurebench",
             base_commit="abc",
             feature_request="Add a fuzzy matching mode.",
+            repo="owner/repo",
+            language="c",
+            core_func="match_string",
+            entry_points=["int match_string(const char*, const char*)"],
+            n_variants=3,
         )
     )
     claim_obs = claim_tool(ClarifyClaimVariantAction(variant_name="strict"))
 
     workspace = tmp_path / "repo" / ".openhands" / "clarify"
+    ws_dir = workspace / "owner__repo.abc.test_feature.deadbeef.lv1"
     assert workspace_obs.is_error is False
-    assert (workspace / "owner__repo.abc.test_feature.deadbeef.lv1").is_dir()
+    assert ws_dir.is_dir()
+    # Rich metadata fields
+    import json as _json
+    meta = _json.loads((ws_dir / "metadata.json").read_text())
+    assert meta["repo"] == "owner/repo"
+    assert meta["language"] == "c"
+    assert meta["core_func"] == "match_string"
+    assert meta["n_variants"] == 3
+    # task_brief.md should exist
+    assert (ws_dir / "task_brief.md").is_file()
+    assert "match_string" in (ws_dir / "task_brief.md").read_text()
+    # workspace tree in obs text
+    assert "<workspace>" in workspace_obs.text
+    # claim variant
     assert claim_obs.data["variant_id"] == 1
-    assert (workspace / "owner__repo.abc.test_feature.deadbeef.lv1" / "klee_1").is_dir()
+    assert (ws_dir / "klee_1").is_dir()
 
 
 def test_klee_solve_reports_missing_klee_sh(tmp_path, monkeypatch):

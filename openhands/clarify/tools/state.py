@@ -23,6 +23,7 @@ class ClarifyState:
     task_done_status: str | None = None
     task_done_summary: str | None = None
     task_done_report: str | None = None
+    n_variants: int = 2
 
 
 def state_path_for(*, persistence_dir: str | None, working_dir: str) -> Path:

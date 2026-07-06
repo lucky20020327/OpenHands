@@ -116,6 +116,37 @@ def _count_ktests(path: Path) -> int:
     return sum(1 for item in path.glob("test*.ktest") if item.is_file())
 
 
+def _build_workspace_tree(root: Path, max_depth: int = 3) -> str:
+    """Build a compact directory tree string limited to *max_depth* levels."""
+
+    def _tree_lines(dir_path: Path, prefix: str = "", depth: int = 0) -> list[str]:
+        if depth >= max_depth:
+            return [f"{prefix}..."]
+        try:
+            entries = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+        except PermissionError:
+            return [f"{prefix}<permission denied>"]
+        entries = [e for e in entries if not e.name.startswith((".", "_"))]
+        lines: list[str] = []
+        for idx, entry in enumerate(entries):
+            is_last = idx == len(entries) - 1
+            connector = "└── " if is_last else "├── "
+            extension = "    " if is_last else "│   "
+            if entry.is_dir():
+                lines.append(f"{prefix}{connector}{entry.name}/")
+                child_max = depth + 1 if entry.name in {"repo", "testbed"} else max_depth
+                lines.extend(_tree_lines(entry, prefix + extension, child_max))
+            else:
+                lines.append(f"{prefix}{connector}{entry.name}")
+        return lines
+
+    result = ["<workspace>"]
+    result.extend(_tree_lines(root))
+    result.append("</workspace>")
+    return "\n".join(result)
+
+
+
 def _read_info_summary(info_path: Path) -> dict[str, Any]:
     if not info_path.is_file():
         return {}
@@ -407,6 +438,28 @@ class ClarifyWorkspaceGenerateAction(Action):
     feature_request: str = Field(description="Public feature request text.")
     dataset: str = Field(default="featurebench")
     base_commit: str | None = None
+    repo: str | None = Field(
+        default=None,
+        description="Repository slug (e.g. owner/repo), if known.",
+    )
+    language: str | None = Field(
+        default=None,
+        description="Primary programming language of the benchmark (e.g. 'python', 'c', 'java').",
+    )
+    core_func: str | None = Field(
+        default=None,
+        description="Name of the core function being specified (for C/C++ KLEE harness).",
+    )
+    entry_points: list[str] = Field(
+        default_factory=list,
+        description="Entry-point function signatures, if available from dataset metadata.",
+    )
+    n_variants: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description="Number of KLEE simulation variants to generate (default 2).",
+    )
     workspace_name: str | None = Field(
         default=None,
         description="Optional workspace directory name under .openhands/clarify.",
@@ -520,12 +573,19 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
             action.feature_request.strip() + "\n",
             encoding="utf-8",
         )
-        metadata = {
+        metadata: dict[str, Any] = {
             "instance_id": action.instance_id,
             "dataset": action.dataset,
             "base_commit": action.base_commit,
+            "repo": action.repo,
+            "language": action.language,
+            "core_func": action.core_func,
+            "entry_points": action.entry_points,
+            "n_variants": action.n_variants,
             "repo_path": str(repo_root),
         }
+        # Strip None values for cleaner metadata.json
+        metadata = {k: v for k, v in metadata.items() if v is not None}
         (workspace / "metadata.json").write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -537,19 +597,57 @@ class ClarifyExecutor(ToolExecutor[Action, ClarifyObservation]):
             encoding="utf-8",
         )
 
+        # Write a task brief that summarises important context for sub-agents.
+        brief_lines = [
+            f"# Task Brief: {action.instance_id}",
+            "",
+            f"**Dataset:** {action.dataset}",
+        ]
+        if action.repo:
+            brief_lines.append(f"**Repo:** {action.repo}")
+        if action.base_commit:
+            brief_lines.append(f"**Base commit:** {action.base_commit}")
+        if action.language:
+            brief_lines.append(f"**Language:** {action.language}")
+        if action.core_func:
+            brief_lines.append(f"**Core function:** `{action.core_func}`")
+        if action.entry_points:
+            brief_lines.append(
+                f"**Entry points:** {', '.join(f'`{e}`' for e in action.entry_points)}"
+            )
+        brief_lines.extend([
+            f"**Variants to generate:** {action.n_variants}",
+            "",
+            "## Feature Request",
+            "",
+            action.feature_request.strip(),
+        ])
+        (workspace / "task_brief.md").write_text(
+            "\n".join(brief_lines) + "\n", encoding="utf-8"
+        )
+
         state.workspace = str(workspace)
         state.repo_path = str(repo_root)
         state.instance_id = action.instance_id
         state.dataset = action.dataset
         state.base_commit = action.base_commit
+        state.n_variants = action.n_variants
         self._save(state)
 
+        workspace_tree = _build_workspace_tree(workspace)
         text = (
             "Clarify workspace prepared.\n"
             f"workspace: {workspace}\n"
-            f"klee scaffold: {klee_dir}\n"
-            "Next: inspect feature_request.md, write harness/mock files under "
-            "klee/ or a claimed variant, then run clarify_klee_solve."
+            f"klee scaffold: {klee_dir}\n\n"
+            f"Workspace tree:\n{workspace_tree}\n\n"
+            "Next steps:\n"
+            "1. Read feature_request.md (or task_brief.md) for full task context.\n"
+            "2. Write the shared KLEE harness: edit klee/core_abi.hpp with CoreInput/"
+            "CoreOutput types, create klee/harness_0.cpp + klee/mock_0.cpp.\n"
+            "3. Call clarify_claim_variant to create each isolated simulation directory.\n"
+            "4. Write implementation variants and call clarify_klee_solve for each.\n"
+            "5. Call clarify_cross_validation after all variants are solved.\n"
+            "6. Call clarify_task_done with the final ambiguity analysis."
         )
         return _text_observation(
             text,
