@@ -104,6 +104,7 @@ from openhands.app_server.utils.docker_utils import (
 )
 from openhands.app_server.utils.git import ensure_valid_git_branch_name
 from openhands.app_server.utils.import_utils import get_impl
+from openhands.app_server.utils.clarify_llm import apply_clarify_llm_overrides
 from openhands.app_server.utils.llm_metadata import (
     get_llm_metadata,
     should_set_litellm_extra_body,
@@ -1207,7 +1208,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             provider_base_url=self.openhands_provider_base_url,
         )
 
-        return user.agent_settings.llm.model_copy(
+        llm = user.agent_settings.llm.model_copy(
             update={
                 'model': model,
                 'base_url': base_url,
@@ -1215,6 +1216,7 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
                 'usage_id': 'agent',
             }
         )
+        return apply_clarify_llm_overrides(llm, requested_model=model)
 
     async def _add_system_mcp_servers(
         self, mcp_servers: dict[str, Any], conversation_id: UUID

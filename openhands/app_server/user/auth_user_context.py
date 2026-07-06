@@ -108,6 +108,9 @@ class AuthUserContext(UserContext):
     async def get_authenticated_git_url(
         self, repository: str, is_optional: bool = False
     ) -> str:
+        provider_tokens = await self.user_auth.get_provider_tokens()
+        if not provider_tokens and '/' in repository and '://' not in repository:
+            return f'https://github.com/{repository}.git'
         provider_handler = await self.get_provider_handler()
         url = await provider_handler.get_authenticated_git_url(
             repository, is_optional=is_optional

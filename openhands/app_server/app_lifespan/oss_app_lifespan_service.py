@@ -7,6 +7,7 @@ from alembic import command
 from alembic.config import Config
 
 from openhands.app_server.app_lifespan.app_lifespan_service import AppLifespanService
+from openhands.app_server.utils.clarify_llm import setup_clarify_llm
 
 
 class OssAppLifespanService(AppLifespanService):
@@ -15,6 +16,9 @@ class OssAppLifespanService(AppLifespanService):
     async def __aenter__(self):
         if self.run_alembic_on_startup:
             self.run_alembic()
+        # Register the optional clarify llm custom LiteLLM providers
+        # (ichat / taiji / tcloud). No-op when the clarify repo is unavailable.
+        setup_clarify_llm()
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):

@@ -122,14 +122,19 @@ class ProcessSandboxService(SandboxService):
         env.update(sandbox_spec.initial_env)
         env['SESSION_API_KEY'] = session_api_key
 
-        # Prepare command arguments
-        cmd = [
-            self.python_executable,
-            '-m',
-            self.agent_server_module,
-            '--port',
-            str(port),
-        ]
+        # Prepare command arguments. When the optional clarify llm package
+        # is available, the launch is transparently wrapped so the agent-server
+        # subprocess registers the ichat/taiji/tcloud providers before running.
+        from openhands.app_server.utils.clarify_llm import (
+            prepare_agent_server_command,
+        )
+
+        cmd, env = prepare_agent_server_command(
+            python_executable=self.python_executable,
+            agent_server_module=self.agent_server_module,
+            extra_args=['--port', str(port)],
+            env=env,
+        )
 
         _logger.info(
             f'Starting agent process for sandbox {sandbox_id}: {" ".join(cmd)}'
@@ -160,12 +165,11 @@ class ProcessSandboxService(SandboxService):
 
     async def _wait_for_server_ready(self, port: int, timeout: int = 30) -> bool:
         """Wait for the agent server to be ready."""
+        timeout = int(os.getenv('PROCESS_SANDBOX_STARTUP_TIMEOUT', str(timeout)))
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                url = replace_localhost_hostname_for_docker(
-                    f'http://localhost:{port}/alive'
-                )
+                url = f'http://127.0.0.1:{port}/alive'
                 response = await self.httpx_client.get(url, timeout=5.0)
                 if response.status_code == 200:
                     data = response.json()
@@ -182,12 +186,11 @@ class ProcessSandboxService(SandboxService):
             process = psutil.Process(process_info.pid)
             if process.is_running():
                 status = process.status()
-                if status == psutil.STATUS_RUNNING:
-                    return SandboxStatus.RUNNING
-                elif status == psutil.STATUS_STOPPED:
+                if status == psutil.STATUS_STOPPED:
                     return SandboxStatus.PAUSED
-                else:
-                    return SandboxStatus.STARTING
+                if status in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+                    return SandboxStatus.MISSING
+                return SandboxStatus.RUNNING
             else:
                 return SandboxStatus.MISSING
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -206,14 +209,14 @@ class ProcessSandboxService(SandboxService):
             # Check if server is actually responding
             try:
                 url = replace_localhost_hostname_for_docker(
-                    f'http://localhost:{process_info.port}{self.health_check_path}'
+                    f'http://127.0.0.1:{process_info.port}{self.health_check_path}'
                 )
                 response = await self.httpx_client.get(url, timeout=5.0)
                 if response.status_code == 200:
                     exposed_urls = [
                         ExposedUrl(
                             name=AGENT_SERVER,
-                            url=f'http://localhost:{process_info.port}',
+                            url=f'http://127.0.0.1:{process_info.port}',
                             port=process_info.port,
                         ),
                     ]
@@ -351,7 +354,8 @@ class ProcessSandboxService(SandboxService):
         # Wait for server to be ready
         if not await self._wait_for_server_ready(port):
             # Clean up if server didn't start properly
-            await self.delete_sandbox(sandbox_id)
+            if os.getenv('PROCESS_SANDBOX_KEEP_FAILED') != '1':
+                await self.delete_sandbox(sandbox_id)
             raise SandboxError('Agent Server Failed to start properly')
 
         return await self._process_to_sandbox_info(sandbox_id, process_info)
