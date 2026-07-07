@@ -75,6 +75,10 @@ When calling `clarify_task_done`:
 - Set `report` to the complete markdown report below, including every section
   and ambiguity entry. Do not put only a short summary in `report`.
 
+`clarify_task_done` is your final action. After it returns successfully, reply
+with a single short plain-text sentence confirming the run is complete and then
+stop. Do not call any more tools and do not return an empty response.
+
 ### Reporting Principles
 
 - Lead with the ambiguity in the request, not with the detection mechanics.
@@ -248,9 +252,8 @@ def _build_bold_prompt(header: str) -> str:
         "",
         "### Step 1: Inspect the prepared workspace",
         "",
-        "The business workspace has already been prepared by the caller. Do not "
-        "call a business workspace preparation tool and do not assume fixed "
-        "filenames. Use the user request plus whatever files/paths the user "
+        "The business workspace has already been prepared by the caller. "
+        "Use the user request plus whatever files/paths the user "
         "provided or that are present in the current workspace.",
         "",
         "### Step 2: Static analysis",
