@@ -626,19 +626,22 @@ _CLARIFY_ANALYST_TOOLS = [*_CLARIFY_FILE_TOOLS]
 def register_clarify_agents() -> None:
     """Register the three clarify sub-agents idempotently."""
     try:
-        from openhands.sdk.agent.agent import Agent
-        from openhands.sdk.subagent import AgentDefinition, register_agent_if_absent
+        from openhands.sdk.subagent import (
+            AgentDefinition,
+            agent_definition_to_factory,
+            register_agent_if_absent,
+        )
     except ImportError:
         return
 
-    def _factory(system_prompt: str):
-        def _make(llm):
-            return Agent(llm=llm, system_prompt=system_prompt)  # type: ignore[arg-type]
-        return _make
+    def _register(definition: AgentDefinition) -> None:
+        register_agent_if_absent(
+            definition.name,
+            agent_definition_to_factory(definition),
+            definition,
+        )
 
-    register_agent_if_absent(
-        "clarify_harness_writer",
-        _factory(_HARNESS_WRITER_PROMPT),
+    _register(
         AgentDefinition(
             name="clarify_harness_writer",
             description=(
@@ -650,9 +653,7 @@ def register_clarify_agents() -> None:
         ),
     )
 
-    register_agent_if_absent(
-        "clarify_simulation_writer",
-        _factory(_SIMULATION_WRITER_PROMPT),
+    _register(
         AgentDefinition(
             name="clarify_simulation_writer",
             description=(
@@ -664,9 +665,7 @@ def register_clarify_agents() -> None:
         ),
     )
 
-    register_agent_if_absent(
-        "clarify_disambiguation_analyst",
-        _factory(_DISAMBIGUATION_ANALYST_PROMPT),
+    _register(
         AgentDefinition(
             name="clarify_disambiguation_analyst",
             description=(

@@ -67,6 +67,33 @@ def test_clarify_agents_are_registered():
         assert agent_name in registered_names, f"{agent_name!r} not registered"
 
 
+def test_clarify_subagent_factories_include_requested_tools(monkeypatch):
+    """Clarify sub-agent factories must materialize their declared tools."""
+    from openhands.clarify.tools import register_clarify_all
+    from openhands.sdk.llm import LLM
+    from openhands.sdk.subagent.registry import get_agent_factory
+    from openhands.tools.preset.default import register_default_tools
+
+    register_default_tools(enable_browser=False)
+    register_clarify_all()
+    monkeypatch.setenv("ALLOW_SHORT_CONTEXT_WINDOWS", "1")
+
+    llm = LLM(model="gpt-4", api_key="test-key")
+    harness_agent = get_agent_factory("clarify_harness_writer").factory_func(llm)
+    simulation_agent = get_agent_factory("clarify_simulation_writer").factory_func(llm)
+
+    assert {tool.name for tool in harness_agent.tools} >= {
+        "terminal",
+        "file_editor",
+    }
+    assert {tool.name for tool in simulation_agent.tools} >= {
+        "terminal",
+        "file_editor",
+        "clarify_claim_variant",
+        "clarify_klee_solve",
+    }
+
+
 def test_prepare_klee_and_claim_variant(tmp_path):
     conv_state = _conv_state(tmp_path)
     prepare_tool = _tool(ClarifyPrepareKleeTool, conv_state)

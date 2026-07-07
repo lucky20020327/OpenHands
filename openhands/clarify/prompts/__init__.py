@@ -314,9 +314,8 @@ def _build_self_check_only_prompt(
         "",
         "### Step 1: Inspect the prepared workspace",
         "",
-        "The business workspace has already been prepared by the caller. Do not "
-        "call a business workspace preparation tool and do not assume fixed "
-        "filenames or directories. Use the user request and current workspace "
+        "The business workspace has already been prepared by the caller. "
+        "Use the user request and current workspace "
         "contents as the source of truth.",
         "",
         "### Step 2: Prepare KLEE scaffold",
@@ -406,9 +405,8 @@ def _build_hybrid_prompt(
         "",
         "### Step 1: Inspect the prepared workspace",
         "",
-        "The business workspace has already been prepared by the caller. Do not "
-        "call a business workspace preparation tool and do not assume fixed "
-        "filenames or directories. Use the user request and current workspace "
+        "The business workspace has already been prepared by the caller. "
+        "Use the user request and current workspace "
         "contents as the source of truth.",
         "",
         "### Step 2: Prepare KLEE scaffold",
