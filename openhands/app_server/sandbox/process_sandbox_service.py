@@ -42,9 +42,6 @@ from openhands.app_server.sandbox.sandbox_spec_service import (
     resolve_sandbox_spec,
 )
 from openhands.app_server.services.injector import InjectorState
-from openhands.app_server.utils.docker_utils import (
-    replace_localhost_hostname_for_docker,
-)
 
 _logger = logging.getLogger(__name__)
 
@@ -111,6 +108,10 @@ class ProcessSandboxService(SandboxService):
         os.makedirs(sandbox_dir, exist_ok=True)
         return sandbox_dir
 
+    def _agent_server_url(self, port: int) -> str:
+        """Return the local URL for a process-runtime agent server."""
+        return f'http://127.0.0.1:{port}'
+
     async def _start_agent_process(
         self,
         sandbox_id: str,
@@ -126,14 +127,18 @@ class ProcessSandboxService(SandboxService):
         env.update(sandbox_spec.initial_env)
         env['SESSION_API_KEY'] = session_api_key
 
-        # Prepare command arguments
-        cmd = [
-            self.python_executable,
-            '-m',
-            self.agent_server_module,
-            '--port',
-            str(port),
-        ]
+        # When the optional custom llm package is available, wrap the launch so
+        # the agent-server subprocess registers ichat/taiji/tcloud providers.
+        from openhands.app_server.utils.custom_llm import (
+            prepare_agent_server_command,
+        )
+
+        cmd, env = prepare_agent_server_command(
+            python_executable=self.python_executable,
+            agent_server_module=self.agent_server_module,
+            extra_args=['--port', str(port)],
+            env=env,
+        )
 
         _logger.info(
             f'Starting agent process for sandbox {sandbox_id}: {" ".join(cmd)}'
@@ -167,9 +172,7 @@ class ProcessSandboxService(SandboxService):
         start_time = time.time()
         while time.time() - start_time < timeout:
             try:
-                url = replace_localhost_hostname_for_docker(
-                    f'http://localhost:{port}/alive'
-                )
+                url = f'{self._agent_server_url(port)}/alive'
                 response = await self.httpx_client.get(url, timeout=5.0)
                 if response.status_code == 200:
                     data = response.json()
@@ -209,15 +212,14 @@ class ProcessSandboxService(SandboxService):
         if status == SandboxStatus.RUNNING:
             # Check if server is actually responding
             try:
-                url = replace_localhost_hostname_for_docker(
-                    f'http://localhost:{process_info.port}{self.health_check_path}'
-                )
+                agent_server_url = self._agent_server_url(process_info.port)
+                url = f'{agent_server_url}{self.health_check_path}'
                 response = await self.httpx_client.get(url, timeout=5.0)
                 if response.status_code == 200:
                     exposed_urls = [
                         ExposedUrl(
                             name=AGENT_SERVER,
-                            url=f'http://localhost:{process_info.port}',
+                            url=agent_server_url,
                             port=process_info.port,
                         ),
                     ]

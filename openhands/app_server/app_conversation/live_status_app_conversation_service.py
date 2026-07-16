@@ -110,6 +110,7 @@ from openhands.app_server.user.user_models import UserInfo
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
+from openhands.app_server.utils.custom_llm import apply_custom_llm_overrides
 from openhands.app_server.utils.git import ensure_valid_git_branch_name
 from openhands.app_server.utils.import_utils import get_impl
 from openhands.app_server.utils.llm_metadata import (
@@ -1240,15 +1241,18 @@ class LiveStatusAppConversationService(AppConversationServiceBase):
             provider_base_url=self.openhands_provider_base_url,
         )
 
-        return user.agent_settings.llm.model_copy(
-            update={
-                'model': model,
-                'base_url': base_url,
-                'api_key': user.agent_settings.llm.api_key,
-                'usage_id': 'agent',
-                # Force streaming on (the SDK LLM defaults stream=False).
-                'stream': True,
-            }
+        return apply_custom_llm_overrides(
+            user.agent_settings.llm.model_copy(
+                update={
+                    'model': model,
+                    'base_url': base_url,
+                    'api_key': user.agent_settings.llm.api_key,
+                    'usage_id': 'agent',
+                    # Force streaming on (the SDK LLM defaults stream=False).
+                    'stream': True,
+                }
+            ),
+            requested_model=model,
         )
 
     async def _add_system_mcp_servers(

@@ -7,6 +7,7 @@ with warnings.catch_warnings():
     import litellm
     from litellm import LlmProviders, ProviderConfigManager, get_llm_provider
 
+from openhands.app_server.utils.custom_llm import get_custom_llm_models
 from openhands.app_server.utils.logger import openhands_logger as logger
 
 # ---------------------------------------------------------------------------
@@ -287,9 +288,16 @@ def get_supported_llm_models(
 
     openhands_models = get_openhands_models(verified_models)
 
+    # Models served by the optional custom llm providers (ichat / taiji / tcloud).
+    # Empty when the llm package is unavailable.
+    custom_models = get_custom_llm_models()
+
     # Assign canonical provider prefixes to bare LiteLLM names, then dedupe.
     all_models = (
-        openhands_models + CLARIFAI_MODELS + [_assign_provider(m) for m in model_list]
+        openhands_models
+        + CLARIFAI_MODELS
+        + custom_models
+        + [_assign_provider(m) for m in model_list]
     )
     unique_models = sorted(set(all_models))
 
